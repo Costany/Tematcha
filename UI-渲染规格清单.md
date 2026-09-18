@@ -1,4 +1,4 @@
-# letcode-tui · UI 渲染规格清单
+# Tematcha · UI 渲染规格清单
 
 > 版本 v0.2 ｜ 2026-09-17（四项设计定稿，见 §15 决策记录）｜ 依据：letcode v0.14.0 ACP 源码取证 + letcode 自带 TUI 截图观察（13 张，见 `refs/screenshots/`）
 >

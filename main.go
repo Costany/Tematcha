@@ -1,4 +1,4 @@
-// main.go —— letcode-tui · M1：真正的 TUI 前端
+// main.go —— Tematcha · M1：真正的 TUI 前端
 //
 // M1 目标：把 M0/M0.5 的控制台冒烟程序升级为可操作的 TUI：
 //   - 消息区：用户 / 思考 / 回复 三种流式增长 + 工具行 + 用量行
@@ -8,9 +8,9 @@
 //
 // 用法：
 //
-//	letcode-tui.exe                 正常启动 TUI
-//	letcode-tui.exe -smoke "你好"    不走 TUI，跑一次协议自检（调试用）
-//	letcode-tui.exe -widthcheck     打印关键符号的显示宽度（排查错位用）
+//	tematcha.exe                 正常启动 TUI
+//	tematcha.exe -smoke "你好"    不走 TUI，跑一次协议自检（调试用）
+//	tematcha.exe -widthcheck     打印关键符号的显示宽度（排查错位用）
 package main
 
 import (
@@ -989,7 +989,7 @@ func (m model) View() tea.View {
 	v := tea.NewView(sb.String())
 	v.AltScreen = true                    // 全屏模式：退出自动还原终端
 	v.MouseMode = tea.MouseModeCellMotion // 打开鼠标：滚轮可用
-	v.WindowTitle = "letcode-tui \u00B7 M1"
+	v.WindowTitle = "Tematcha"
 	return v
 }
 

@@ -1,4 +1,4 @@
-// letcode-tui · M0 / M0.5 协议冒烟
+// Tematcha · M0 / M0.5 协议冒烟
 //
 // M0   先不画界面，让引擎开口说话：
 //  1. spawn `letcode.exe acp`（在 stdio 上跑 ACP，一行一条 JSON）

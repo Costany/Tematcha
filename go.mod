@@ -1,4 +1,4 @@
-module letcode-tui
+module tematcha
 
 go 1.27
 
