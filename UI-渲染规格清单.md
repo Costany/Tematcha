@@ -23,6 +23,8 @@
 
 消息区右缘贴一列滚动条（M4a，见 §10）：内容溢出时 `┃`（拇指，强调绿）+ `│`（轨道，深灰）；不溢出时留白；右栏可见时该列常驻，右栏不因条的出现/消失而横移。
 
+消息区顶部还有钉面板（M5b，见 §5）：`# Todos · 计数` + 待办列表，固定不随消息滚动；占几行、消息区就让几行（整屏行数守恒）。
+
 ## 0.5 视觉原则（2026-09-17 用户要求）
 
 - **终端透明优先**：默认不输出背景色，让终端自身的透明/磨砂背景透过来；**禁止大面积底色**
@@ -36,7 +38,7 @@
 
 - 数据：`user_message_chunk`（提交 prompt 后 / 会话重放时）✅
 - 形态：左侧竖条（**无底色**）+ 缩进正文（等宽）；不用气泡框、不铺背景（省宽度、透明优先）
-- 备注：只渲染事件、不做本地回显——这样会话重放（session/load）天然一致
+- **回显去重（实装，2026-09-18）**：客户端本地回显 + 引擎在回合开始回发同文本 `user_message_chunk`（实机 trace 取证）——用 `localEcho` 登记待消费，回发同文本时吞掉（会话重放的 loading 期间照收，不吃历史消息）。修复前症状：同一条用户消息显示两次（用户截图实况）；自检 `-echotest` 5 项
 - **现状（M1.7 实装）**：`│` 细线（强调绿 `#00E7A4`）+ 空格 + 正文，多行时**每行都带竖条**；**鼠标左键点击该条 → 竖条换成半块 `▌`（视觉加粗）**，点别处取消（两态照 crush 的 UserBlurred/UserFocused）。❯ 前缀在消息区退役（输入区的 ❯ 提示符保留）
 
 ### 1.2 助手回复（Markdown 渲染 · 重点）
@@ -128,6 +130,29 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - 应答格式实锤：`{"outcome":{"outcome":"selected","optionId":"allow_once"}}`（id 原样回显）
 - 来源徽章：子代理发起的请求标题带 `agent_name` 前缀 → 渲染 `explorer ›` 徽章
 
+## 2.5 追问表单（Elicitation · question 工具 · M5a）
+
+- 协议（ACP schema 1.7.0 `v1/elicitation.rs` + letcode `src/acp/driver.rs` 取证）：
+  - 能力广告：`initialize` 的 `clientCapabilities.elicitation.form = {}` —— 不广告的话引擎把 question 工具直接判为 `the ACP client does not support form elicitation` 并自动婉拒
+  - 引擎 → 客户端（反向请求 `elicitation/create`）：`{sessionId, mode:"form", message, requestedSchema:{type:"object", properties:{"question_N":{type,title,description,oneOf:[{const,title,description}]}}, required:[…]}}`；`type=array` = 多选（选项在 `items.oneOf`）
+  - 客户端 → 引擎：`{"action":"accept","content":{"question_1":"<标签>","question_2":["<标签>",…]}}`（单选=字符串、多选=字符串数组；未作答的题不进 content）；`{"action":"decline"}`（用户不想答）；`{"action":"cancel"}`（客户端取消/不支持的 mode）
+- 面板形态（钉在输入区上方，与权限面板同一套"钉子位"；左缘琥珀竖条、无底色）：
+
+```
+  ┃ 追问 2 题 · <message 首行>
+  ┃ ▸ 1/2 <题面标题>
+  ┃     <题面说明（折行）>
+  ┃     ❯ 1) <选项标题>  <选项说明（暗色）>
+  ┃       2) <选项标题>
+  ┃   2/2 <题面标题>     ← 非当前题只留题头（已答时补一行 ✓ 已答：<选项>）
+  ┃ space 选/勾 · ↑↓ 移动 · ←→ 换题 · enter 提交 · esc 拒绝
+```
+
+- 键位：`↑↓` 选项移动 / `←→`·`tab`·`shift+tab` 换题 / `space` 勾选（多选切换、单选选中后自动跳下一道未答题）/ `1..9` 直选 / `enter` 全答完则提交、否则跳下一道未答题 / `esc` 拒绝（回 decline）
+- 占位与回执：消息区先落暗色 `→ 等待回答… <message 首行>`；提交后原地换绿条 `已回答 · N 题 · 题1=…`，拒绝换 `已拒绝回答 · …`
+- 边界：不认识的 mode（url）直接回 `cancel`（不渲染面板）；回合结束/引擎断开时丢弃未答表单（同权限面板）
+- 自检：`-elicittest`（7 项：解析/url 不支持/渲染宽度无背景/键位/accept 体形状/decline + 未答不进 content/队列）；真机探针：`-smokeelicit -smoke "…用 question 工具问我…"` → 实测引擎发 `elicitation/create`、自动作答后 `question 2 fields (completed)`
+
 ## 3. 状态栏
 
 - 数据：`usage_update(used, size)`、`current_mode_update`、`config_option_update(model/reasoning)`、session title ✅
@@ -154,7 +179,8 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
   - 右栏小列表：`○` 待办 / `◐` 进行中 / `✓` 完成（完成=暗色）
   - 消息区一次性钉面板（`# Todos`，letcode 同款），新快照时更新，`/todos` 可收起
 - 注意：blocked→pending、cancelled→completed 有损映射（接受，视觉无法区分）
-- **现状（M3b 实装，2026-09-18）**：右栏小列表已实装（`○/◐/✓` + `待办 1/4` 计数）；消息区钉面板（`# Todos`）暂未做，留待后续（右栏已覆盖主要用途）
+- **现状（M3b 实装，2026-09-18）**：右栏小列表已实装（`○/◐/✓` + `待办 1/4` 计数）
+- **现状（M5b 实装，2026-09-18）**：消息区顶部钉面板已实装 —— `# Todos · 1/4` 标题 + `○/◐/✓` 列表（完成项暗色）；固定不动、不参与滚动；最多 6 条、超出折成 `… 还有 N 条`；`/todos` 开关（客户端命令：不发引擎、不进历史、不新开回合）；数据随 `plan` 全量快照刷新（行数变化 → 消息区高度自动重算）；宽度按显示宽裁剪、只前景色。自检：`-todostest`（渲染/超长截断/开关/布局让位/View 集成 5 项全绿）
 
 ## 6. 输入区
 
@@ -198,6 +224,11 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 ## 8. 压缩（Compact）
 
 - 触发：用户 `/compact` ✅ ｜ 引擎自发 ⚠️（ACP 无主动通知）
+- **现状（M5d 实装，2026-09-18）**：协议取证（driver.rs / projection.rs）——`/compact` 成功 = 正常回合结束；失败回 JSON-RPC 错误（`letcode could not compact the session context[: …]`）；**压缩过程引擎不发任何进度通知**（Compaction 事件不进 projection）→ 进行中由客户端模拟。
+  - 进行中：识别 `/compact`（beginTurn 置压缩态）→ 状态栏「正在整理上下文」+ 8 格跳跃小条（500ms 心跳驱动来回扫）
+  - 完成：`usage_update` 的 used 下降 ≥5 个百分点 → 上下文条从旧值缓动到新值（心跳 1/4 步长）+ 回执「上下文已压缩：87.3k → 12.4k」；引擎自发整理走同路径（回执加注「（引擎自动整理）」）
+  - 收尾：手动 /compact 整回合未见下降 → 「压缩请求已完成（未观察到用量下降）」（取消的回合不算）；`could not compact` 有本地提示行
+  - 自检：`-compacttest` 7 项（识别/瞬态/缓动/噪声不误报/自发措辞/收尾/指纹）
 - 进行中：状态栏瞬态 `正在整理上下文...` + 跳跃小条（compact-bar 手艺）
 - 完成：usage 下降（条形动画过渡）；失败：错误块（含引擎给的 reason）
 - 💤 上游：压缩状态也走 ACP 通知（扩展点 #2）
@@ -205,9 +236,16 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 ## 9. 子代理
 
 - v1（协议内）：
+  - 已实装（M5d，2026-09-18）——协议形状全部实机取证（`@explorer` 真机 trace + catalog.rs / driver.rs / result.rs）：
   - 父级工具卡（agent**explore / agent**oracle / agent\_\_fixer …）按 §1.4 渲染（"派遣"类图标）
   - 结果 JSON 解析 `structured_result` → 自算 chips：`read 6 · commands 12 · checks 2` ✅
   - 子代理的权限/问题请求 → §2 + `explorer ›` 来源徽章 ✅
+  - 工具名：`agent__explore/fixer/oracle/designer/librarian/general`（+ 管理类 `agent__jobs/status/wait/cancel`）
+  - in_progress 的 title 是 `agent__explore {紧凑 JSON}`（噪音）→ 弃用 title，改从 `rawInput.task` 造摘要行：`explore · <task>`
+  - completed 的 `content.text` 是 JSON 信封 `{ok, tool, data:{summary, structured_result{files_read, files_changed, commands_run, validation, findings}}}` → 结果行换成 `data.summary`、chips 由计数拼出（read · changed · commands · checks · findings，只列非零）
+  - 工具卡头行：齿轮换 `»` 派遣图标（颜色仍随状态）；chips 接在结果行尾
+  - 子权限来源徽章：标题 `"<agent>: <summary>"` → 拆出 `fixer ›` 徽章（只认已知角色名，普通冒号标题不误伤）
+  - 自检：`-agenttest` 6 项（识别/信封/chips/摘要/工具卡渲染/来源徽章/符号宽度）
 - 💤 上游愿望：活体活动行（`fs__read — read … · has more`）、`/child` 跳转、完整面板（扩展点 #1）
 
 ## 10. 滚动与流式
@@ -227,6 +265,9 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - **透明优先**：`*_bg` token 默认不落地（见 §0.5）；强调一律用前景色
 - 字符纪律：widthcheck 清单（`❯ ⌛ ▍ ▌ ┃ ✓ ◐ ○` 等）；所有宽度用 lipgloss.Width
 
+- **现状（M5c 实装，2026-09-18）**：色板集中到 `theme.go` 的 `Theme`（20+ 前景色 token），全 UI 样式变量由 `applyTheme` 重建（渲染点零改动）；内置主题 `sprout`（默认 · 柔绿渐变）/ `mono`（灰度）；`/theme` 客户端命令（列清单 / 切换；不发引擎、不进历史、不落盘 —— 重启回默认）；切换时作废 glamour 渲染器缓存（`mdRenderers` 构造时把颜色烤了进去）。自检：`-themetest`（7 项：注册表 / 命令全链路 / mono 全灰探测器 / 四色存在性 / 渐变几何 / 缓存作废 ×2 —— markdown 渲染器 + 消息条渲染缓存）
+- **markdown 配色边界（M5c 口径）**：glamour dark 内部还有一批自有 colors（标题 / 链接 / chroma 语法制导色）；M5c 只把行内代码（`Code` = 强调绿）与粗体（`Strong`）接进主题，其余待后续统一 —— 所以 mono 主题下 markdown 仍随 glamour dark
+
 ## 11.5 主题色板 · 柔绿渐变（2026-09-17 定调）
 
 **基调**：内置默认主题 `sprout` —— 主体色为**柔和的绿色渐变**（黄绿 → 草绿 → 青绿）。
@@ -241,21 +282,22 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 | B    | `#79C77D` | 草绿（中段 · 也是主强调色） |
 | C    | `#4C875F` | 深植绿（深端 · cactus 感）  |
 
-**应用清单**：
+**应用清单（M5c 落地情况）**：
 
-- Spinner / 活动指示：字符沿渐变循环（实现参考 crush `anim.Settings{GradColorA, GradColorB, CycleColors}`）
-- 边框流动（border blend rotation）：参考 lipgloss `examples/blending`
-- 上下文进度条（§3）：绿色系渐变为底，占用升高时向黄/红过渡（阈值见 §3）
-- 绿条回执（§1.6）、权限面板强调线（§2）：统一用主强调色 B
-- Logo / Header（未来加入时）：整体渐变
+- Spinner / 活动指示：字符沿渐变循环（实现参考 crush `anim.Settings{GradColorA, GradColorB, CycleColors}`）—— 未做，留给 M5d 动画批
+- 边框流动（border blend rotation）：参考 lipgloss `examples/blending` —— 未做（v1 无边框）
+- 上下文进度条（§3）：**已实装（M5c）** —— 绿档填充格按 A → B → C 取值（`lipgloss.Blend1D`，CIELAB 混合）；≥60% 转琥珀、≥85% 转柔红（阈值仍按 §3）
+- 绿条回执（§1.6）：**已实装** —— 用强调绿 `#00E7A4`（`Theme.Accent` token）
+- 权限面板强调线（§2）：**保持琥珀**（警示语义 —— 与"需要操作"绑定，不并入绿色系；见 §15 ㉙）
+- Logo / Header（未来加入时）：整体渐变 —— 未做
 
-**实现时机**：M5（主题阶段）；先以常量形式内置，后接 `letcode themes` 换肤体系。
+**实现时机（M5c 已落地）**：已按常量形式内置（`theme.go` 的 sprout / mono）+ `/theme` 切换命令；接 `letcode themes` 换肤体系仍留后续。
 
 **补充 · 强调绿（2026-09-17 用户指定，M1.7 起实装）**：
 
 - 另有一支更亮的强调绿 `#00E7A4`（用户指定；比草绿 B 更亮、略偏蓝），用于**小面积强调元素**：用户消息竖条（§1.1）、行内代码（§1.2）
-- 与柔绿渐变的分工暂定：**渐变**管主题级/大面积动效（spinner、边框、进度条），**强调绿**管单字符/小元素；M5 统一主题时再定两者的家族关系（是否把 `#00E7A4` 并入渐变锚点或替换 B）
-- 落点已在代码：`ui_feed.go` 的 `userBarStyle`、`md.go` 的 `Code.Color`
+- **家族关系（M5c 定论，2026-09-18）**：`#00E7A4` 不并入渐变锚点、也不替换 B —— 它是独立 token（`Theme.Accent`），专管小面积强调；渐变 A/B/C 管"沿长度过渡"的元素（上下文条）。B 同时是"成功"语义色（工具绿），两者亮度接近、同屏协调
+- 落点（M5c 起）：`theme.go` 的 `Accent` token；渲染点 = `ui_feed.go` 的 `userBarStyle` / `scrollThumbStyle`、`md.go` 的 `Code.Color`
 
 ## 11.6 灵动感设计（参考 pi，2026-09-17 定调）
 
@@ -306,14 +348,14 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 
 ## 13. v1 边界与愿望清单（实锤）
 
-| #   | 内容                             | 状态                              |
-| --- | -------------------------------- | --------------------------------- |
-| 1   | 子代理活体行 / /child / 完整面板 | 💤 需上游扩展 ACP projection      |
-| 2   | 压缩状态主动通知（含自发压缩）   | 💤 同上                           |
-| 3   | 上下文分段明细                   | 💤 协议只给 used/size 总数        |
-| 4   | token ↑↓ / t/s                   | ⚠️ 不做或客户端估算               |
-| 5   | elicitation 表单                 | 💤 首版不声明；目标形态见 refs 06 |
-| 6   | /theme、/child、/parent 等命令   | ⚠️ 协议明确拒绝；主题由前端自管   |
+| #   | 内容                             | 状态                                                                        |
+| --- | -------------------------------- | --------------------------------------------------------------------------- |
+| 1   | 子代理活体行 / /child / 完整面板 | 💤 需上游扩展 ACP projection                                                |
+| 2   | 压缩状态主动通知（含自发压缩）   | 💤 同上                                                                     |
+| 3   | 上下文分段明细                   | 💤 协议只给 used/size 总数                                                  |
+| 4   | token ↑↓ / t/s                   | ⚠️ 不做或客户端估算                                                         |
+| 5   | elicitation 表单                 | ✅ 已实装（M5a，2026-09-18）：能力声明 + `elicitation/create` 面板，见 §2.5 |
+| 6   | /theme、/child、/parent 等命令   | ⚠️ /theme 已由前端自管（M5c：sprout / mono 切换）；/child、/parent 仍随协议拒绝                                             |
 
 ## 14. 里程碑映射
 
@@ -328,13 +370,17 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - M2b（**已实装**，2026-09-18）：§1.4 工具卡 v1（鼠标点击展开/收起 + 自动三态 + 输出 tail 末 8 行 + rawInput 展示；键盘选择态留 v2）
 - M2b v2（**已实装**，2026-09-18）：§1.4 键盘选择态（Tab 进出 / ↑↓ 选卡 / enter 展开收起 / esc 只退模式；选中卡头行 `▌` 强调绿；`-navtest` 状态机自检 9 条全绿）
 - M3 状态栏（**已实装**，2026-09-18）：§3 实况数据（模式徽章 / 上下文条阈值色 / 模型名·思考档 / 窄屏降级）
-- M3b 右栏（**已实装**，2026-09-18）：§4 会话信息/上下文/待办小列表 + §5 待办列表（消息区钉面板留后续）+ ctrl+b 开关 + 窄屏自动隐藏
+- M3b 右栏（**已实装**，2026-09-18）：§4 会话信息/上下文/待办小列表 + §5 待办列表 + ctrl+b 开关 + 窄屏自动隐藏
 - M4a 右缘滚动条（**已实装**，2026-09-18）：§10 竖向滚动条（1 格外挂列 + crush 几何；`-scrolltest` 几何与 View 集成自检）；顺带修正 handleClick 的右栏命中边界（计入滚动条列）
 - M4b 命令弹层（**已实装**，2026-09-18）：§7 数据接 available_commands_update（9 条引擎命令）+ 过滤 / ↑↓ / tab 补全 / enter 执行（带参数先补全）/ esc 关闭 + 窄屏降级；`-cmdtest` 22 项全绿
 - M4c 输入历史（**已实装**，2026-09-18）：§6 ↑↓ 召回发送过的内容（空输入/翻历史中才接管，有草稿仍滚消息区）；`-histtest` 12 项全绿
 - M4d 会话列/载（**已实装**，2026-09-18）：§7 `/resume` → 会话选择列表（session/list）+ session/load 重放上屏（新增 user_message_chunk 分支）；`-sesstest` 11 项全绿；真机探针 `-sessions` / `-load <id>` 均通过
 - M4e 命令护栏 + 错误块宽度修正（**已实装**，2026-09-18）：§1.5 宽度预算修正（gutter 2 格）+ `Detail` 提示行 + `clipLine` 兜底；§7 客户端护栏（缺参数 / 参数越界 / 本地专有命令 → 琥珀提示，不发引擎）；`-feedtest` 宽度断言 + `-scrolltest` 右块锚定不变量（新增错误/护栏/工具卡混合样张）；同批打磨：`wrapText` 词边界优先折行（英文/命令名不再被截断）+ 护栏提示去重；`-cmdtest` 25 项与全部自检回归全绿
 - M3c 输入队列（**已实装**，2026-09-18）：§3 状态栏「排队 N」+ §6 回合锁改队列（忙时提交 → `kQueued` 暗色条目 → 回合结束原地转正 + 自动开下一回合，不产生重复消息）；`-queuetest` 6 项全绿
+- M5a 追问表单 elicitation（**已实装**，2026-09-18）：§2.5 —— `initialize` 广告 `elicitation.form`，接 `elicitation/create` 并渲染表单（单选/多选/1..9 直选/enter 提交/esc 拒绝，accept·decline·cancel 三种应答）；`-elicittest` 7 项全绿；真机探针 `-smokeelicit` 跑通（引擎 `question` 工具从被婉拒 → `2 fields (completed)`）
+- M5b Todos 钉面板（**已实装**，2026-09-18）：§5 消息区顶部 `# Todos · 计数` 固定面板（不滚动；占几行消息区扣几行）+ `/todos` 客户端开关（不发引擎）+ `plan` 快照驱动刷新；`-todostest` 5 项全绿
+- M5c 主题系统（**已实装**，2026-09-18）：§11 / §11.5 —— 色板集中（`theme.go` 的 `Theme` + `applyTheme`）+ 内置 `sprout` / `mono` + `/theme` 客户端命令 + 上下文条柔绿渐变（A→B→C，CIELAB 混合）；`-themetest` 7 项全绿（含 mono 全灰探测器 + 两类缓存作废）
+- M5d 压缩动画 + 子代理增强（**已实装**，2026-09-18）：§8 —— `/compact` 瞬态（「正在整理上下文」+ 跳跃小条）+ usage 下降缓动/回执 + 收尾与错误指纹（`-compacttest` 7 项）；§9 —— agent 信封解析（summary + chips）、`»` 派遣图标、子权限来源徽章（`-agenttest` 6 项）
 
 ## 15. 决策记录（Decision Log）
 
@@ -357,10 +403,16 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - 2026-09-18 ⑰ 键盘选择态 = **显式模式（Tab 进出）**：enter 与"发送"的冲突不靠重映射解决——Tab 进入后 enter 归选择态（展开/收起），打字/点击/esc/tab 退出即恢复发送；esc 在模式内只退模式（防误触取消回合）。候选卡只算"有内容的卡"；选中卡头行换 `▌` 且**颜色跟随齿轮状态色**（成功绿 / 失败红 / 进行中灰），一眼看出选中的卡是成是败（宽度不变）；状态栏联动「选择工具卡 i/n」+ 键位提示
 - 2026-09-18 ⑱ "实际失败"（ToolBad）= 引擎 failed ∪ 命令级失败（shell 类摘要 `exit ≠ 0`）；红齿轮 / 红选中条 / 默认展开三处统一跟随。背景：用户实测 `shell__exec ls -la`（exit 1）显示为绿色——引擎语义如此（工具跑完了，exit code 是数据）；原版 letcode 无此推导，由前端补一刀（用户要求）
 - 2026-09-18 ⑲ 状态栏（M3）= 左「引擎状态 · 模式徽章 · 上下文条 · 模型」+ 右快捷键；阈值色 <60 绿 / <85 黄 / ≥85 红；窄屏从尾部丢段（模型 → 条 → 徽章）；模态（权限/选择态）优先。数据源与 ACP schema 字段名对齐（currentModeId / used / size / configOptions.id = mode|reasoning_effort；camelCase）
-- 2026-09-18 ⑳ 右栏（M3b）= 消息区右侧 28 格信息栏 +「 │ 」分隔列；ctrl+b 开关、<100 列自动隐藏；数据接 session_info_update.title 与 plan.entries（全量快照）；点击右栏不落消息区；消息区钉面板（# Todos）留后续
+- 2026-09-18 ⑳ 右栏（M3b）= 消息区右侧 28 格信息栏 +「 │ 」分隔列；ctrl+b 开关、<100 列自动隐藏；数据接 session_info_update.title 与 plan.entries（全量快照）；点击右栏不落消息区
 - 2026-09-18 ㉑ 滚动条（M4a）= **外挂 1 格列、不占内容宽**（不触发重排）：溢出即常显（不做 crush 的 2 秒自动隐藏——v1 求状态可预测）；拇指=强调绿、轨道=深灰；不溢出整列留白；几何照 crush、数据复用现有 allLines/normH/scroll（零新增状态）；右栏可见时该列常驻，右栏不横移
 - 2026-09-18 ㉒ 命令弹层（M4b）= **引擎广告即弹层数据**（available_commands_update，命令以 prompt 文本执行，引擎侧分派；未知文本仍当提问）。定稿：`/` 且无空格才弹；esc 只关不删；enter **无参数直接执行 / 带参数只补全**（口令与发送键冲突的正面解法）；弹层行数从消息区扣出、与权限面板同一套"钉子位"机制；↑↓/tab 在弹层开着时优先于滚动与工具卡选择态（模态序：权限 > 弹层 > 选择态 > 滚动）
 - 2026-09-18 ㉓ 输入历史（M4c）= **↑↓ 分档接管**：空输入（或翻历史中）翻历史，有草稿时 ↑↓ 仍是滚消息区（保住既有手感，滚轮/PgUp/PgDn 不受影响）；历史仅内存、连续重复去重、↓↓ 还原草稿、手改即退出浏览
 - 2026-09-18 ㉔ 会话列/载（M4d）= **`/resume` 客户端接管**：引擎只认带 id 的 `/resume`，所以不带参数时弹会话列表（session/list 单页、按工作区过滤），enter 走 `session/load` —— 引擎**先重放历史再应答**（重放只有文本，工具卡不入内），客户端先清屏再逐条上屏（新增 `user_message_chunk` 分支）；载入期间 busy 锁 + 状态栏「载入会话…」。模态序更新：权限 > **会话列表** > 弹层 > 选择态 > 滚动
 - 2026-09-18 ㉕ 命令护栏（M4e）= **把"引擎必拒"的话本地说清**：引擎规则（带 hint 缺参数必拒 / 本地专有命令必拒 / 未知文本当提问）在客户端镜像成三种拦截；关键词是"省一次白跑 + 输入不丢"（拦下时输入框内容保留，用户接着补参数）。同批修掉错误块的**宽度预算**（前缀实测宽）并补 `Detail` "怎么办"提示行——起因：用户截图里 `/resume` 的引擎报错把"右栏顶出去了"（错误行超预算 2 格）
 - 2026-09-18 ㉖ 回合锁改**输入队列**（M3c）= 用户口径"AI 在动我又发了一条，这条应该排队，等它执行完再插进去"：忙时提交不拒绝、不报错，而是入队（消息区以 `kQueued` 暗色条目呈现「· 排队中」），当前回合一结束就**原地转正**（同一条目换回 kUser）并自动开下一回合——状态栏「排队 N」告知还压着几条。选择原地转正而非"重新发一条"，正是为了不重蹈早前截图里"用户消息出现两次"的观感
+- 2026-09-18 ㉗ 追问走**协议级 elicitation**（M5a）= Grok 分类里"追问是协议新能力、不是 M5 主题"——认同，所以单独立一个里程碑提前做：`initialize` 广告 `elicitation.form` + 接 `elicitation/create` + 表单面板（选项式作答，非自由文本）；关键是**三种应答语义要对**：accept（带 content）/ decline（用户不想答，面板 esc）/ cancel（客户端取消、不支持的 mode）。真机取证：不广告时引擎自动婉拒（`question 4 questions · the ACP client does not support form elicitation`），广告后同一个 question 工具走完整表单并 `completed`
+- 2026-09-18 ㉘ Todos 钉面板（M5b）= **消息区顶部固定面板 + `/todos` 开关**：面板不参与滚动（读待办不该翻历史），占几行就从消息区高度里扣几行（整屏行数守恒，与权限面板同属"钉子位"机制）；`/todos` 归客户端（引擎命令表里没有它，不拦会被当成普通提问发给模型）；最多 6 条 + `… 还有 N 条`；数据沿用 `plan` 全量快照。布局实现要点：`syncLayout` 先定宽度再算钉面板行数（行数只由待办条数决定，与宽度无关）
+- 2026-09-18 ㉙ 主题系统（M5c）= **色板集中 + 样式变量重建**：颜色不散落在渲染点，全部收进 `theme.go` 的 `Theme`；`applyTheme` 重建包级样式变量（渲染点无感），并作废 glamour 渲染器缓存（它是构造时烤色的）。内置 `sprout`（默认 · 柔绿渐变）+ `mono`（灰度）；`/theme` 客户端命令切换（引擎命令表没有它；不落盘，重启回默认）。柔绿渐变第一处落点 = 上下文条填充格 —— 用官方 `lipgloss.Blend1D`（CIELAB 混合），正中 §11.5 "避免中间发灰"的诉求。`mono` 兼作自检的硬编码探测器：切灰后样张里若还有彩色 SGR，说明有渲染点没走主题。缓存纪律：换主题必须作废两类"烤色"缓存 —— glamour 渲染器（mdRenderers 重建）与消息条渲染缓存（itemLines 按 themeEpoch 代次校验，不 bump ver 也重渲染）
+- 2026-09-18 ㉚ 用户消息回显去重 = **引擎会回发，客户端要消费**：实机 trace 证明正常回合开始引擎也发同文本 `user_message_chunk`（早先以为只有 session/load 重放才发），叠加客户端本地回显 → 同一条消息在消息区显示两次（用户截图实况）。修法：`localEcho` 登记最近一次本地回显文本（submit / 出队转正两处登记），`handleSessionUpdate` 里同文本且在 loading 之外即消费掉；迟到回发（回合结束后才到）也覆盖——登记不提前清。自检 `-echotest` 5 项（含"重放照收""文本不匹配照收"两个反例）
+- 2026-09-18 ㉛ 压缩可见性（M5d）= **协议无进度 → 客户端模拟 + usage 下降当完成信号**：`/compact` 是命令回合（成功 = end_turn、失败 = 明确错误、过程零通知；driver.rs / projection.rs 取证）。所以：提交即置瞬态（状态栏「正在整理上下文」+ 8 格跳跃小条）；完成靠 `usage_update` 下降 ≥5 个百分点识别（上下文条缓动 + 回执；引擎自发整理走同口径、措辞加注）；取消不算完成；`could not compact` 有本地提示。5 个百分点阈值防普通波动误报
+- 2026-09-18 ㉜ 子代理可见性（M5d）= **信封解析替代标题噪音**：`agent__*` 工具的 in_progress title 是「工具名 + 参数 JSON」（不可读），完成 content 是 `{ok, data:{summary, structured_result}}` 信封（实机 trace 取证）→ 摘要行取 `rawInput.task`、结果行取 `data.summary`、chips 数 `structured_result` 各数组；头行 `»` 派遣图标；子权限标题 `"<agent>: …"` 拆来源徽章（只认已知角色名）。上游愿望（活体活动行 / `/child` 跳转）仍留扩展点

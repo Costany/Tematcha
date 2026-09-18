@@ -22,37 +22,43 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// ---------------------------------------------------------------------------
-// 样式（全 UI 共用；透明度原则：只前景色）
+// 样式（全 UI 共用；透明度原则：只前景色）。
+//
+// 颜色不写死在这里 —— 全部由主题驱动：theme.go 的 applyTheme 在包加载时按
+// 默认主题 sprout 重建这些变量，/theme 切换时再重建一次。改色请去 theme.go。
 // ---------------------------------------------------------------------------
 
 var (
-	textStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#D0D0D0"))            // 正文
-	userBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00E7A4"))            // 用户消息左侧竖条（强调绿）
-	thoughtPre   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8A8A8A"))            // 思考前缀
-	thoughtTtl   = lipgloss.NewStyle().Foreground(lipgloss.Color("#B4B4B4"))            // 思考标题
-	thoughtTxt   = lipgloss.NewStyle().Foreground(lipgloss.Color("#8F8F8F"))            // 思考正文（暗）
-	toolStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#9A9A9A"))            // 工具行（进行中）
-	toolOKStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#79C77D"))            // 工具行·成功（柔绿）
-	toolErStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#C97B7B"))            // 工具行·失败（柔红）
-	toolOutStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8F8F8F"))            // 工具卡展开区·输出（亮度介于正文与暗色之间）
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6E6E6E"))            // 次要信息
-	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#D98A8A")).Bold(true) // 错误（柔红）
-	cursorStyle  = lipgloss.NewStyle().Reverse(true)                                    // 光标：反色格子
+	textStyle    lipgloss.Style // 正文
+	userBarStyle lipgloss.Style // 用户消息左侧竖条（强调绿）
+	thoughtPre   lipgloss.Style // 思考前缀
+	thoughtTtl   lipgloss.Style // 思考标题
+	thoughtTxt   lipgloss.Style // 思考正文（暗）
+	toolStyle    lipgloss.Style // 工具行（进行中）
+	toolOKStyle  lipgloss.Style // 工具行·成功（柔绿）
+	toolErStyle  lipgloss.Style // 工具行·失败（柔红）
+	toolOutStyle lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
+	dimStyle     lipgloss.Style // 次要信息
+	errStyle     lipgloss.Style // 错误（柔红）
+
+	// 光标：反色格子 —— 与主题无关（反色不是颜色）
+	cursorStyle = lipgloss.NewStyle().Reverse(true)
 
 	// 输入区 / 状态栏
-	ruleStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#464646"))            // 输入区上下细线
-	placeholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565656"))            // 占位提示
-	inputTextStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#E6E6E6"))            // 输入文字
-	modelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#E6E6E6")).Bold(true) // letcode 字样
-	thinkStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166"))            // 状态：思考中
-	replyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#6FB6F0"))            // 状态：回复中
-	warnStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD166"))            // 状态：提醒
+	ruleStyle        lipgloss.Style // 输入区上下细线
+	placeholderStyle lipgloss.Style // 占位提示
+	inputTextStyle   lipgloss.Style // 输入文字
+	modelStyle       lipgloss.Style // letcode 字样
+	thinkStyle       lipgloss.Style // 状态：思考中
+	replyStyle       lipgloss.Style // 状态：回复中
+	warnStyle        lipgloss.Style // 状态：提醒
+	promptOffStyle   lipgloss.Style // 输入提示符（空输入）
+	promptOnStyle    lipgloss.Style // 输入提示符（打字后）
 
 	// 消息区右缘滚动条（M4a）：拇指=强调绿（与用户消息竖条同色，视觉语言统一），
 	// 轨道=深灰（比输入区细线更暗，与右栏分隔列拉开层次）。只前景色，透明度原则。
-	scrollThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00E7A4")) // 拇指 ┃
-	scrollTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3C3C3C")) // 轨道 │
+	scrollThumbStyle lipgloss.Style // 拇指 ┃
+	scrollTrackStyle lipgloss.Style // 轨道 │
 )
 
 // ---------------------------------------------------------------------------
@@ -91,6 +97,7 @@ type FeedItem struct {
 	ToolName  string // 原始工具名：fs__read / shell__exec
 	ToolCall  string // 调用摘要：fs__read demo-lab/README.md
 	ToolEnd   string // 结果摘要：read demo-lab/README.md (12 lines)
+	ToolChips string // 子代理结果计数（M5d）：read 2 · commands 1 · checks 1
 	ToolState string // pending / in_progress / completed / failed
 
 	// ToolBad = "实际失败"（渲染：红齿轮 / 红选中条 / 默认展开）：
@@ -109,10 +116,11 @@ type FeedItem struct {
 
 	ver uint64 // 内容版本：每次修改 ++，用于缓存失效
 
-	// 渲染缓存
-	cacheW   int
-	cacheVer uint64
-	cache    []string
+	// 渲染缓存（cacheEpoch 对齐主题代次：换主题后旧缓存作废，见 theme.go）
+	cacheW     int
+	cacheVer   uint64
+	cacheEpoch uint64
+	cache      []string
 	// 流式光标（由主模型维护）：Cursor=本条是否带光标；CursorOn=闪烁相位
 	Cursor   bool
 	CursorOn bool
@@ -272,12 +280,12 @@ func (f *Feed) allLines() ([]string, []*FeedItem) {
 
 // itemLines 渲染一条消息（带缓存；流式中的 item 不缓存）。
 func (f *Feed) itemLines(it *FeedItem) []string {
-	if !it.Cursor && it.cache != nil && it.cacheW == f.width && it.cacheVer == it.ver {
+	if !it.Cursor && it.cache != nil && it.cacheW == f.width && it.cacheVer == it.ver && it.cacheEpoch == themeEpoch {
 		return it.cache
 	}
 	out := renderItem(it, f.width)
 	if !it.Cursor {
-		it.cacheW, it.cacheVer, it.cache = f.width, it.ver, out
+		it.cacheW, it.cacheVer, it.cacheEpoch, it.cache = f.width, it.ver, themeEpoch, out
 	}
 	return out
 }
@@ -666,21 +674,36 @@ func toolLines(it *FeedItem, w int) []string {
 	}
 
 	// 齿轮后跟展开指示（▸ 收起 / ▾ 展开）；没有可展开内容时不带指示。
+	// 子代理（M5d）：齿轮换 » 派遣图标，颜色仍随状态（成功绿/失败红/进行中灰）。
 	pre := "\u23E3"
+	if isAgentTool(it.ToolName) {
+		pre = "\u00BB"
+	}
 	preW := 1
 	if hasToolBody(it) {
 		mark := "\u25B8" // ▸
 		if it.ToolExpanded {
 			mark = "\u25BE" // ▾
 		}
-		pre = "\u23E3 " + mark
+		pre = pre + " " + mark
 		preW = 3
 	}
 	out := labeled(pre, preW, w, head+suffix, gear, toolStyle)
 
 	tail := ""
+	tp := ""
 	if it.ToolEnd != "" && it.ToolEnd != head && it.ToolEnd != it.ToolName {
-		tail = "· " + it.ToolEnd
+		tp = it.ToolEnd
+	}
+	if it.ToolChips != "" { // M5d：子代理计数拼在结果行尾
+		if tp != "" {
+			tp += " · " + it.ToolChips
+		} else {
+			tp = it.ToolChips
+		}
+	}
+	if tp != "" {
+		tail = "· " + tp
 	}
 	if tail != "" {
 		last := out[len(out)-1]

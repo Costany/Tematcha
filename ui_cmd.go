@@ -76,7 +76,7 @@ func cmdToken(text string) (string, bool) {
 // palOpen 弹层是否显示：有命令数据、输入停在命令词上、没被 esc 关掉，
 // 且权限面板 / 工具卡选择态这类模态不在场（模态优先）。
 func (m model) palOpen() bool {
-	if m.palHidden || len(m.cmds) == 0 || m.perm != nil || m.cardNav != nil {
+	if m.palHidden || len(m.cmds) == 0 || m.perm != nil || m.elicit != nil || m.cardNav != nil {
 		return false
 	}
 	_, ok := cmdToken(m.input.Text())

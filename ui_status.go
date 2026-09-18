@@ -135,13 +135,13 @@ func (m model) renderInputBlock() string {
 	return rule + "\n" + "  " + row + "\n" + rule
 }
 
-// renderPrompt 提示符（空输入时暗淡，打字后变绿）。
+// renderPrompt 提示符（空输入时暗淡，打字后变绿；颜色随主题）。
 func (m model) renderPrompt() string {
-	c := lipgloss.Color("#4A4A4A")
+	st := promptOffStyle
 	if len(m.input.buf) > 0 {
-		c = lipgloss.Color("#3CCF7E")
+		st = promptOnStyle
 	}
-	return lipgloss.NewStyle().Foreground(c).Render("\u276F")
+	return st.Render("\u276F")
 }
 
 // renderInputLine 输入行内容（含反色光标）。
@@ -283,6 +283,10 @@ func (m model) engineStateText() string {
 			return dimStyle.Render("回合结束")
 		}
 	}
+	// M5d：压缩回合进行中——状态词换成"正在整理上下文"+跳跃小条
+	if m.compactReq && m.busy {
+		return m.compactStateText()
+	}
 	switch m.status {
 	case stIdle:
 		return dimStyle.Render("空闲")
@@ -323,18 +327,14 @@ func (m model) renderModeBadge() string {
 	return st.Render(m.modeID)
 }
 
-// renderContextBar 上下文条：miniBar + 百分比 + used/size（阈值色 <60 绿 / <85 黄 / ≥85 红）。
+// renderContextBar 上下文条：miniBar + 百分比 + used/size。
+// 填充段：绿档走柔绿渐变（§11.5 的 A → B → C，CIELAB 混合）；≥60% 整段转琥珀、
+// ≥85% 转柔红（阈值见 §3）。百分比文字始终用阈值色。
 func (m model) renderContextBar() string {
 	if m.usageSize <= 0 {
 		return ""
 	}
-	pct := int(m.usageUsed * 100 / m.usageSize)
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
+	pct := m.shownPct() // M5d：压缩后缓动显示（动画中 = barPct）
 	const barW = 10
 	fill := pct * barW / 100
 	st := toolOKStyle
@@ -344,8 +344,17 @@ func (m model) renderContextBar() string {
 	case pct >= 60:
 		st = warnStyle
 	}
-	bar := st.Render(strings.Repeat("\u2588", fill)) +
-		ruleStyle.Render(strings.Repeat("\u2591", barW-fill))
+	var bar string
+	switch {
+	case pct >= 60:
+		bar = st.Render(strings.Repeat("\u2588", fill))
+	default:
+		grad := contextBarGrad(barW)
+		for i := 0; i < fill && i < len(grad); i++ {
+			bar += lipgloss.NewStyle().Foreground(grad[i]).Render("\u2588")
+		}
+	}
+	bar += ruleStyle.Render(strings.Repeat("\u2591", barW-fill))
 	tail := dimStyle.Render(fmtK(m.usageUsed) + "/" + fmtK(m.usageSize))
 	return bar + " " + st.Render(fmt.Sprintf("%d%%", pct)) + " " + tail
 }

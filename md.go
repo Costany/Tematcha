@@ -46,15 +46,15 @@ func transparentDarkStyle() ansi.StyleConfig {
 
 	s.Code.BackgroundColor = nil // 行内代码去底色
 	// 行内代码颜色：glamour dark 原样是 256 色 203（粉红 #FF5F87），
-	// 用户要求换成绿色 —— 用与用户消息竖条同一支强调绿 #00E7A4。
-	s.Code.Color = sptr("#00E7A4")
+	// 用户要求换成绿色 —— 用主题的强调绿（sprout = #00E7A4，与用户消息竖条同色）。
+	s.Code.Color = sptr(activeTheme.Accent)
 
 	// 粗体：终端对 CJK 的 SGR-1 加粗常常没有视觉变化（中文字体普遍没有
 	// 粗体变体），因此同时给颜色（亮白）保证强调可见——这也是 letcode/crush
 	// 一类专业 TUI 的通行做法：不依赖终端粗体，用颜色表达强调。
 	s.Strong = ansi.StylePrimitive{
 		Bold:  boolPtr(true),
-		Color: sptr("#FFFFFF"),
+		Color: sptr(activeTheme.Strong),
 	}
 
 	if s.CodeBlock.Chroma != nil {

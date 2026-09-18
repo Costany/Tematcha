@@ -279,10 +279,14 @@ func (c *ACPClient) send(v map[string]any) error {
 // ---------------------------------------------------------------------------
 
 // Initialize 握手第一步：锁协议版本，声明客户端能力。
+// 能力里广告 form elicitation（M5a）—— 引擎的 question 工具靠它判断
+// "客户端能不能渲染表单"；不广告就会被自动婉拒（QUESTIONS_UNSUPPORTED）。
 func (c *ACPClient) Initialize() (map[string]any, error) {
 	return c.Call("initialize", map[string]any{
-		"protocolVersion":    1,
-		"clientCapabilities": map[string]any{},
+		"protocolVersion": 1,
+		"clientCapabilities": map[string]any{
+			"elicitation": map[string]any{"form": map[string]any{}},
+		},
 	}, 30*time.Second)
 }
 

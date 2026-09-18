@@ -32,6 +32,7 @@ type PermOption struct {
 type PermRequest struct {
 	RPCID       any    // 反向请求的原始 JSON-RPC id（原样回传，类型不能变）
 	Title       string // 工具调用标题（如 shell__exec npm test）
+	Origin      string // 子代理来源（"fixer: …" 拆出的 fixer；§9 来源徽章）
 	Command     string // rawInput.command（有则单独展示成 $ 行）
 	RawInput    string // rawInput 的紧凑 JSON（备查）
 	Options     []PermOption
@@ -54,6 +55,11 @@ func parsePermRequest(rpcID any, params map[string]any) *PermRequest {
 	}
 	if strings.TrimSpace(p.Title) == "" {
 		p.Title = "工具调用"
+	}
+	// 子代理的权限请求标题带来源前缀（driver.rs 的 permission_tool_call：
+	// format!("{origin}: {summary}")）——拆出来当来源徽章（§9）。
+	if origin, rest := splitAgentOrigin(p.Title); origin != "" {
+		p.Origin, p.Title = origin, rest
 	}
 	for _, o := range asList(params["options"]) {
 		om := asMap(o)
@@ -188,12 +194,9 @@ func (m *model) settlePermCancelled(p *PermRequest) {
 // 整屏行数恒定（面板钉在输入区上方、随内容上推，不悬浮遮挡）。
 func (m *model) syncLayout() {
 	panelH := len(m.renderPermPanel(m.width))
-	cmdH := len(m.renderCmdPalette())     // M4b：命令弹层也钉在输入区上方，一起让位
-	sessH := len(m.renderSessionPicker()) // M4d：会话选择列表同理
-	h := m.height - 6 - panelH - cmdH - sessH
-	if h < 3 {
-		h = 3
-	}
+	elicitH := len(m.renderElicitPanel(m.width)) // M5a：追问表单也钉在输入区上方
+	cmdH := len(m.renderCmdPalette())            // M4b：命令弹层也钉在输入区上方，一起让位
+	sessH := len(m.renderSessionPicker())        // M4d：会话选择列表同理
 	// 右栏（M3b）显示时，消息区宽度让位（分隔列 + 右栏内容）
 	w := m.width - 6
 	if m.panelVisible() {
@@ -201,6 +204,13 @@ func (m *model) syncLayout() {
 	}
 	if w < 30 {
 		w = 30
+	}
+	// M5b：钉面板（# Todos）钉在消息区顶部、不参与滚动——占几行就扣几行。
+	// 先定宽度再算它（渲染器要宽度参数；行数只由待办条数决定，顺序别反）。
+	todosH := len(m.renderTodosPinned(w))
+	h := m.height - 6 - panelH - elicitH - cmdH - sessH - todosH
+	if h < 3 {
+		h = 3
 	}
 	m.feed.SetSize(w, h)
 }
@@ -232,8 +242,14 @@ func (m *model) renderPermPanel(w int) []string {
 
 	// ① 标题：琥珀"需要批准" + 工具标题
 	head := warnStyle.Render("需要批准")
+	used := lipgloss.Width("需要批准")
+	if p.Origin != "" { // M5d：子代理来源徽章（fixer ›）
+		badge := p.Origin + " \u203A"
+		head += dimStyle.Render(" · ") + warnStyle.Render(badge)
+		used += 3 + lipgloss.Width(badge)
+	}
 	if p.Title != "" {
-		head += dimStyle.Render(" · ") + textStyle.Render(clipWidth(p.Title, textW-9))
+		head += dimStyle.Render(" · ") + textStyle.Render(clipWidth(p.Title, textW-used-3))
 	}
 	out = append(out, gutter+head)
 

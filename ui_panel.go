@@ -256,3 +256,160 @@ func runPanelTest() {
 	}
 	fmt.Println("paneltest: 全部通过")
 }
+
+// ---------------------------------------------------------------------------
+// M5b：消息区钉面板（# Todos）
+// ---------------------------------------------------------------------------
+
+// todosMaxRows 钉面板最多显示几条待办（超出的折成一行「… 还有 N 条」）。
+const todosMaxRows = 6
+
+// isTodosToggle 输入是否正好是 /todos（客户端命令：开关钉面板，不发引擎）。
+// 注意：letcode 的命令表里没有 /todos，不拦的话它会被当成普通提问发给模型。
+func isTodosToggle(text string) bool {
+	return strings.TrimSpace(text) == "/todos"
+}
+
+// todosVisible 钉面板是否显示：开关开着且快照里确实有待办。
+func (m model) todosVisible() bool {
+	return m.todosOn && len(m.todos) > 0
+}
+
+// renderTodosPinned 渲染消息区顶部的钉面板（不随消息区滚动消失）：
+//
+//	# Todos · 1/4
+//	  ○ 读取 demo-lab 的目录结构
+//	  ◐ 把 README 第一行改成标题
+//	  ✓ 运行 npm test 验证
+//
+// 透明度原则：只前景色；标题暗色、正文浅色、完成项暗色。宽度按显示宽裁剪。
+// 篇幅：最多 todosMaxRows 条 + 一行溢出提示。
+func (m model) renderTodosPinned(w int) []string {
+	if !m.todosVisible() {
+		return nil
+	}
+	if w < 12 {
+		w = 12
+	}
+	done, total := m.panelDoneCount()
+	out := []string{dimStyle.Render(fmt.Sprintf("# Todos \u00B7 %d/%d", done, total))}
+	shown := m.todos
+	overflow := 0
+	if len(shown) > todosMaxRows {
+		overflow = len(shown) - todosMaxRows
+		shown = shown[:todosMaxRows]
+	}
+	for _, t := range shown {
+		mark, st := todoMark(t.Status)
+		cst := textStyle
+		if t.Status == "completed" {
+			cst = dimStyle
+		}
+		out = append(out, "  "+st.Render(mark)+" "+cst.Render(clipWidth(t.Content, w-4)))
+	}
+	if overflow > 0 {
+		out = append(out, "  "+dimStyle.Render(fmt.Sprintf("\u2026 还有 %d 条", overflow)))
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// -todostest：钉面板自检（渲染 / 超长截断 / 开关 / 布局 / View 集成）
+// ---------------------------------------------------------------------------
+
+// runTodosTest 断言 M5b 钉面板的渲染、开关、高度让位与 /todos 拦截。
+func runTodosTest() {
+	failed := false
+	check := func(name string, cond bool) {
+		tag := "PASS"
+		if !cond {
+			tag = "FAIL"
+			failed = true
+		}
+		fmt.Printf("[%s] %s\n", tag, name)
+	}
+
+	sample := []TodoEntry{
+		{Content: "读取 demo-lab 的目录结构", Status: "completed"},
+		{Content: "把 README.md 的第一行改成标题（这条故意写得很长，用来验证宽度裁剪不会超预算）", Status: "in_progress"},
+		{Content: "运行 npm test 验证", Status: "pending"},
+		{Content: "提交改动并总结", Status: "pending"},
+	}
+
+	// ① 渲染：# Todos · 计数 + ○/◐/✓ 标记 + 宽度合规 + 无背景色
+	m := model{width: 100, feed: NewFeed(), status: stIdle, todosOn: true, todos: sample}
+	m.feed.SetSize(m.width-6, 20)
+	lines := m.renderTodosPinned(m.feed.width)
+	joined := stripANSI(strings.Join(lines, "\n"))
+	okHead := len(lines) == 5 && strings.Contains(stripANSI(lines[0]), "# Todos \u00B7 1/4")
+	okMarks := strings.Contains(joined, "\u2713") && strings.Contains(joined, "\u25D0") && strings.Contains(joined, "\u25CB")
+	okW, okBG := true, true
+	for _, ln := range lines {
+		if lipgloss.Width(ln) > m.feed.width {
+			okW = false
+		}
+		if hasBackgroundColor(ln) {
+			okBG = false
+		}
+	}
+	fmt.Println("== 钉面板样张（宽 100）==")
+	for _, ln := range lines {
+		fmt.Printf("  %s\n", stripANSI(ln))
+	}
+	check("渲染：# Todos · 1/4 + ○/◐/✓ 标记 / 宽度合规 / 无背景色", okHead && okMarks && okW && okBG)
+
+	// ② 超长列表：最多 6 条 + 「… 还有 N 条」
+	many := make([]TodoEntry, 10)
+	for i := range many {
+		many[i] = TodoEntry{Content: fmt.Sprintf("待办第 %d 条", i+1), Status: "pending"}
+	}
+	m.todos = many
+	lines = m.renderTodosPinned(m.feed.width)
+	okCap := len(lines) == 1+todosMaxRows+1 && strings.Contains(stripANSI(lines[len(lines)-1]), "还有 4 条")
+	check("超长列表：最多 6 条 + 末行「… 还有 4 条」", okCap)
+
+	// ③ /todos 开关：收起/展开；不发引擎、不新开回合
+	m.todos = sample
+	m.input.SetText("/todos")
+	next, cmd := m.submit()
+	m = next.(model)
+	okOff := !m.todosOn && len(m.renderTodosPinned(m.feed.width)) == 0 && len(m.sent) == 0 && cmd == nil && !m.busy
+	m.input.SetText("/todos")
+	next, _ = m.submit()
+	m = next.(model)
+	okOn := m.todosOn && len(m.renderTodosPinned(m.feed.width)) == 5
+	check("/todos：收起/展开；不发引擎（sent 为空）、不新开回合", okOff && okOn)
+
+	// ④ 布局：钉面板占几行、消息区就让几行；View 行数不变且钉面板在消息区顶部
+	vm := model{
+		width: 120, height: 30, feed: NewFeed(), status: stIdle, panelOn: true, todosOn: true, todos: sample,
+		sessTitle: "钉面板集成样张", modelLabel: "Step 3.7 Flash", modeID: "default",
+	}
+	vm.syncLayout()
+	pinnedH := len(vm.renderTodosPinned(vm.feed.width))
+	hWith := vm.feed.height
+	vm.todosOn = false
+	vm.syncLayout()
+	hWithout := vm.feed.height
+	check("布局：钉面板占几行、消息区就让几行", pinnedH == 5 && hWith+pinnedH == hWithout)
+
+	vm.todosOn = true
+	vm.syncLayout()
+	content := vm.View().Content
+	vlines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	okRows := len(vlines) == vm.height
+	okTop := len(vlines) > 1 && strings.Contains(stripANSI(vlines[1]), "# Todos")
+	okW2 := true
+	for _, ln := range vlines {
+		if lipgloss.Width(ln) > vm.width {
+			okW2 = false
+		}
+	}
+	check("View 集成：行数不变 / 钉面板在消息区顶部 / 宽度合规", okRows && okTop && okW2)
+
+	if failed {
+		fmt.Println("todostest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("todostest: 全部通过")
+}

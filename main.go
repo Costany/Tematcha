@@ -141,6 +141,95 @@ func runQueueTest() {
 }
 
 // ---------------------------------------------------------------------------
+// -echotest：用户消息回显去重自检（引擎回发 user_message_chunk 不是第二条消息）
+// ---------------------------------------------------------------------------
+
+// runEchoTest 断言"本地回显 + 引擎回发"不会让同一条用户消息显示两次。
+// 实机 trace 取证：正常回合开始引擎会回发一次同文本 user_message_chunk
+// （早先以为只有 session/load 重放才发）——客户端本地已回显过，必须消费掉。
+func runEchoTest() {
+	failed := false
+	check := func(name string, cond bool) {
+		tag := "PASS"
+		if !cond {
+			tag = "FAIL"
+			failed = true
+		}
+		fmt.Printf("[%s] %s\n", tag, name)
+	}
+
+	echo := func(m *model, text string) {
+		m.handleSessionUpdate(map[string]any{
+			"update": map[string]any{
+				"sessionUpdate": "user_message_chunk",
+				"content":       map[string]any{"text": text},
+			},
+		})
+	}
+	countUsers := func(m model) int {
+		n := 0
+		for _, it := range m.feed.items {
+			if it.Kind == kUser {
+				n++
+			}
+		}
+		return n
+	}
+
+	// ① 正常发送：本地回显 1 条；引擎回发同文本 → 消费，不落第二条
+	m := model{width: 100, feed: NewFeed(), status: stIdle}
+	m.feed.SetSize(94, 20)
+	m.input.SetText("单纯好奇")
+	next, _ := m.submit()
+	m = next.(model)
+	echo(&m, "单纯好奇")
+	check("正常回合：本地回显 + 引擎回发同文本 → 只显示一条用户消息",
+		countUsers(m) == 1 && m.feed.Len() == 1 && m.localEcho == "")
+
+	// ② 排队转正后同理：转正时登记 localEcho，回发被消费
+	m.input.SetText("第二条")
+	next, _ = m.submit() // busy → 入队
+	m = next.(model)
+	nm, _ := m.handleTurnDone(turnDoneMsg{reason: "end_turn"}) // 出队转正 + 开下一回合
+	m = nm.(model)
+	echo(&m, "第二条")
+	check("排队转正：转正消息的引擎回发同样被消费（kUser 仍只有两条）",
+		countUsers(m) == 2 && m.localEcho == "")
+
+	// ③ 迟到回发：回合已结束（localEcho 仍登记着）→ 照样消费
+	m2 := model{width: 100, feed: NewFeed(), status: stIdle}
+	m2.feed.SetSize(94, 20)
+	m2.input.SetText("迟到场景")
+	next, _ = m2.submit()
+	m2 = next.(model)
+	nm2, _ := m2.handleTurnDone(turnDoneMsg{reason: "end_turn"})
+	m2 = nm2.(model)
+	echo(&m2, "迟到场景")
+	check("迟到回发：回合结束后才到的回显也消费（不会多出一条）",
+		countUsers(m2) == 1)
+
+	// ④ 会话重放（loading）：同文本不是回显，必须照收
+	m3 := model{width: 100, feed: NewFeed(), status: stLoading, loading: true}
+	m3.feed.SetSize(94, 20)
+	echo(&m3, "历史里的消息")
+	check("会话重放：loading 期间照常收录（不吃历史消息）",
+		countUsers(m3) == 1)
+
+	// ⑤ 文本不同：不是回显，照收
+	m4 := model{width: 100, feed: NewFeed(), status: stIdle}
+	m4.feed.SetSize(94, 20)
+	m4.localEcho = "甲"
+	echo(&m4, "乙")
+	check("文本不匹配：照常收录（回显只吞同一条消息）", countUsers(m4) == 1 && m4.localEcho == "甲")
+
+	if failed {
+		fmt.Println("echotest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("echotest: 全部通过")
+}
+
+// ---------------------------------------------------------------------------
 // 顶层 model
 // ---------------------------------------------------------------------------
 
@@ -178,6 +267,9 @@ type model struct {
 	sessTitle string
 	todos     []TodoEntry
 	panelOn   bool
+
+	// M5b 钉面板（§5）：todosOn = 消息区顶部「# Todos」是否展开（/todos 开关）。
+	todosOn bool
 
 	// M4b 命令弹层（§7）：cmds = 引擎广告的斜杠命令（available_commands_update）；
 	// palHidden = 被 esc 关掉过（输入再变化即恢复）；palSel = 选中在过滤结果里的下标。
@@ -226,9 +318,27 @@ type model struct {
 	perm      *PermRequest
 	permQueue []*PermRequest
 
+	// 追问面板（M5a · elicitation/create）：elicit = 正在回答的表单；
+	// elicitQueue = 排队等待的表单（引擎同一时刻一般只有一条）。
+	elicit      *ElicitRequest
+	elicitQueue []*ElicitRequest
 	// M3c 输入队列：回合进行中提交的消息先排队（在消息区以 kQueued 暗色呈现），
 	// 当前回合一结束就出队转正、自动接着发——不再是"回合进行中，拒绝"。
 	queue []*FeedItem
+
+	// localEcho = 最近一次本地回显的用户消息文本。实机 trace 取证：引擎会在
+	// 回合开始对同一条消息回发 user_message_chunk——消费掉它，避免同一条用户
+	// 消息在消息区显示两次（用户截图实况）。会话重放（loading）时不消费。
+	localEcho string
+
+	// M5d 压缩动画（§8）：compactReq = 本回合是 /compact（状态栏显示"正在整理
+	// 上下文"+跳跃小条）；compactSawDrop = 这回合里观察到用量下降；
+	// barPct/barTo/barAnim = 上下文条的缓动显示值（心跳驱动）。
+	compactReq     bool
+	compactSawDrop bool
+	barPct         int
+	barTo          int
+	barAnim        bool
 }
 
 func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasoning string) model {
@@ -244,6 +354,7 @@ func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasonin
 		modeID:        modeID,
 		reasoning:     reasoning,
 		panelOn:       true,
+		todosOn:       true,
 		tools:         make(map[string]*FeedItem),
 	}
 }
@@ -267,6 +378,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case blinkMsg:
 		m.blinkOn = !m.blinkOn
 		m.blinkN++
+		m.stepBarAnim() // M5d：压缩后的上下文条缓动（心跳驱动）
 		if m.active != nil {
 			m.active.CursorOn = m.blinkOn
 		}
@@ -376,6 +488,20 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// 追问面板（M5a）：表单模态 —— ↑↓ 选项、←→ 换题、space 勾选、
+	// 1..9 直选、enter 提交、esc 拒绝（decline）；其余键不进输入框。
+	if m.elicit != nil {
+		if m.elicitKey(k) {
+			return m, nil
+		}
+		switch k.String() {
+		case "up", "down", "pgup", "pgdown":
+			// 滚动键放行
+		default:
+			return m, nil
+		}
+	}
+
 	// 会话选择列表（M4d）：↑↓ 选、enter 载入、esc 关闭；开着时其余键不进输入框。
 	// 排在权限面板之后、命令弹层之前 —— 它是更"重"的模态。
 	if m.sessOn {
@@ -410,6 +536,7 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.tools = make(map[string]*FeedItem)
 			m.feed = NewFeed() // 重放会把整套历史重新上屏：先清旧画面
 			m.feed.Append(kSys, "载入会话 "+row.ID+"（引擎将重放历史）")
+			m.resetUsage() // M5d：清用量快照，避免把换会话误判成压缩
 			m.syncLayout()
 			return m, loadSessionAsync(m.client, row.ID)
 		default:
@@ -530,8 +657,8 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if m.panelVisible() && msg.X >= m.feed.width+scrollBarW+panelSepW {
 		return m, nil
 	}
-	// View 布局：第 0 行是顶部留白，之后才是消息区窗口
-	target := m.feed.ItemAt(msg.Y - 1)
+	// View 布局：第 0 行是顶部留白，接着是钉面板（M5b），之后才是消息区窗口
+	target := m.feed.ItemAt(msg.Y - 1 - len(m.renderTodosPinned(m.feed.width)))
 
 	// 工具卡：展开/收起（没有可展开内容时不响应，免得误置 UserSet）。
 	if target != nil && target.Kind == kTool {
@@ -566,6 +693,45 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Text())
 	if text == "" {
+		return m, nil
+	}
+
+	// M5b：/todos 是客户端命令（引擎命令表里没有它），本地开关钉面板，不发引擎
+	if isTodosToggle(text) {
+		m.input.Clear()
+		m.todosOn = !m.todosOn
+		m.syncLayout()
+		m.feed.ScrollToBottom()
+		switch {
+		case !m.todosOn:
+			m.feed.Append(kSys, "待办面板已收起（/todos 可再展开）")
+		case len(m.todos) == 0:
+			m.feed.Append(kSys, "待办面板已展开：快照里还没有待办（引擎发 plan 时自动更新）")
+		default:
+			m.feed.Append(kSys, "待办面板已展开")
+		}
+		return m, nil
+	}
+
+	// M5c：/theme 是客户端命令（引擎命令表里没有它）—— 列清单 / 切换主题，不发引擎。
+	// 切换只重建样式变量（theme.go 的 applyTheme），下一次 View 即生效。
+	if name, isCmd := parseThemeCmd(text); isCmd {
+		m.input.Clear()
+		m.feed.ScrollToBottom()
+		if name == "" {
+			m.feed.Append(kSys, themeListLine())
+			return m, nil
+		}
+		t, ok := themeByName(name)
+		switch {
+		case !ok:
+			m.feed.Append(kWarn, "没有这个主题："+name+"；可选："+strings.Join(themeOrder, " | "))
+		case t.Name == activeTheme.Name:
+			m.feed.Append(kSys, "已经是 "+t.Name+"（"+t.Desc+"）")
+		default:
+			applyTheme(t)
+			m.feed.Append(kSys, "主题已切换："+t.Name+"（"+t.Desc+"）")
+		}
 		return m, nil
 	}
 
@@ -607,9 +773,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.queue = append(m.queue, m.feed.Append(kQueued, text))
 		return m, nil
 	}
-
 	m.feed.ScrollToBottom()
 	m.feed.Append(kUser, text)
+	m.localEcho = text // 引擎会回发同文本 user_message_chunk：登记待消费，防重复显示
 	return m.beginTurn(text)
 }
 
@@ -621,6 +787,10 @@ func (m model) beginTurn(text string) (model, tea.Cmd) {
 	m.busy = true
 	m.status = stThinking
 	m.turnStart = time.Now()
+	m.compactReq = isCompactCmd(text) // M5d：压缩回合的状态栏瞬态
+	if m.compactReq {
+		m.compactSawDrop = false
+	}
 	m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
 	m.tools = make(map[string]*FeedItem)
 
@@ -649,7 +819,8 @@ func (m *model) dequeueNext() (string, bool) {
 		return "", true
 	}
 	it.Kind = kUser
-	it.touch() // 内容版本 +1 → 渲染缓存失效，绿条亮字立刻生效
+	it.touch()            // 内容版本 +1 → 渲染缓存失效，绿条亮字立刻生效
+	m.localEcho = it.Text // 转正消息的引擎回显同理：登记待消费
 	return it.Text, true
 }
 
@@ -660,6 +831,7 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 	m.endThoughtCycle()
 	m.endAssistantSegment() // 回合收束：最后一段正文到此为止
 	m.dropPerms("回合已结束")    // 回合收尾后，挂起的审批请求已失去意义
+	m.dropElicits("回合已结束")  // 追问同理（正常情况下它们会在回合内答完）
 	switch {
 	case msg.err != nil:
 		it := m.feed.Append(kError, "回合出错："+msg.err.Error())
@@ -677,6 +849,15 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 		dur = time.Since(m.turnStart)
 	}
 	m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
+
+	// M5d 压缩收尾：手动 /compact 且整回合没观察到用量下降 → 给一句说明；
+	// 取消的回合不算完成（引擎没跑完）。登记清零避免影响下一回合。
+	if m.compactReq {
+		if msg.err == nil && msg.reason != "cancelled" && !m.compactSawDrop {
+			m.feed.Append(kSys, "压缩请求已完成（未观察到用量下降）")
+		}
+		m.compactReq, m.compactSawDrop = false, false
+	}
 
 	// M3c：队列里还有排队消息 → 立刻出队转正，接着开下一回合（用户不用再敲一次）
 	if text, ok := m.dequeueNext(); ok {
@@ -696,6 +877,8 @@ func engineErrorHint(s string) string {
 		return "这条命令是 letcode 本地 TUI 专有，ACP 模式下不可用"
 	case strings.Contains(s, "reasoning effort change"):
 		return "当前模型/供应商不接受该推理档位——可先 /model 换模型，或用 /reasoning 查看可选值"
+	case strings.Contains(s, "could not compact"):
+		return "引擎没提交压缩（常见原因：上下文已在预算内，或另有回合占用）——可稍后再试"
 	case strings.Contains(s, "rejected the session"):
 		return "引擎拒绝了这次会话设置变更（多为模型/供应商限制）"
 	}
@@ -720,6 +903,14 @@ func (m *model) handleEvent(ev ACPEvent) {
 			m.pushPerm(parsePermRequest(ev.RawID, ev.Params))
 		}
 
+	case "elicitation/create":
+		// 追问（M5a）：question 工具的表单请求 —— 面板渲染 + 作答后回
+		// {"action":"accept","content":{…}}（decline/cancel 亦然，见 ui_elicit.go）。
+		// 前提是 initialize 里广告过 form elicitation。
+		if ev.RawID != nil {
+			m.pushElicit(parseElicitRequest(ev.RawID, ev.Params))
+		}
+
 	default:
 		// 其它反向请求：先回空结果，防止引擎一直等
 		if ev.RawID != nil {
@@ -736,12 +927,18 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 	}
 	switch kind, _ := upd["sessionUpdate"].(string); kind {
 	case "user_message_chunk":
-		// M4d：只在 session/load 的重放里出现（正常回合的用户消息由本地回显，
-		// 引擎不发）。每来一条 = 上一段正文 / 思考周期到此为止。
+		// 两种来源：① 正常回合开始，引擎对刚提交的消息回发一次（本地已回显过，
+		// 消费掉避免显示两次——localEcho 登记于 submit / 出队转正）；② session/load
+		// 重放（loading 期间本地没回显，必须照收）。
+		// 每来一条 = 上一段正文 / 思考周期到此为止。
 		m.endAssistantSegment()
 		m.endThoughtCycle()
 		if text := chunkText(upd); text != "" {
-			m.feed.Append(kUser, text)
+			if !m.loading && text == m.localEcho {
+				m.localEcho = "" // 引擎把本地回显的那条原样回发：吞掉，不落第二条
+			} else {
+				m.feed.Append(kUser, text)
+			}
 		}
 	case "agent_message_chunk":
 		m.endThoughtCycle() // 回答开始 = 上一段思考周期结束（定格其耗时）
@@ -803,6 +1000,7 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 	case "plan":
 		// 待办全量快照（每次整体替换；blocked→pending、cancelled→completed 为引擎侧有损映射，接受）
 		m.todos = parsePlan(asList(upd["entries"]))
+		m.syncLayout() // M5b：钉面板行数随快照变化 → 消息区高度重算
 	case "session_info_update":
 		// 会话标题（引擎在会话命名/改名时下发；null = 清除）
 		if v, ok := upd["title"]; ok {
@@ -933,8 +1131,20 @@ func (m *model) handleToolUpdate(upd map[string]any) {
 		it.ToolName = title
 	case status == "completed" || status == "failed":
 		it.ToolEnd = title
+		if isAgentTool(it.ToolName) && status == "completed" {
+			// 子代理完成：content 是 JSON 信封（实机 trace 取证）→ 摘要 + 计数 chips
+			if env, ok := parseAgentEnvelope(it.ToolOut); ok && env.Summary != "" {
+				it.ToolEnd = env.Summary
+				it.ToolChips = env.Chips
+			}
+		}
 	case it.ToolCall == "":
-		it.ToolCall = title
+		if isAgentTool(it.ToolName) {
+			// 子代理派遣：标题是 "agent__explore {JSON}" 噪音，改从 rawInput 造摘要
+			it.ToolCall = agentCallLine(agentRole(it.ToolName), agentTaskFromRaw(it.ToolRaw))
+		} else {
+			it.ToolCall = title
+		}
 	default:
 		it.ToolEnd = title
 	}
@@ -1045,7 +1255,9 @@ func toolContentText(v any) string {
 // handleUsageUpdate 更新本回合的用量行（一条 item 原地刷新），
 // 并把数字留给状态栏的上下文条（M3）。
 func (m *model) handleUsageUpdate(upd map[string]any) {
+	oldUsed, oldSize := m.usageUsed, m.usageSize
 	m.usageUsed, m.usageSize = asInt64(upd["used"]), asInt64(upd["size"])
+	m.noteUsageDrop(oldUsed, oldSize, m.usageUsed, m.usageSize) // M5d：明显下降 = 压缩完成
 	text := fmt.Sprintf("用量 %v / %v", fmtNum(upd["used"]), fmtNum(upd["size"]))
 	if m.usageItem == nil {
 		m.usageItem = m.feed.Append(kUsage, text)
@@ -1211,19 +1423,24 @@ func (m model) View() tea.View {
 	// 右栏（§4/§5）显示时：消息区每行右侧拼「  │ 」+ 右栏对应行
 	feedLines := m.feed.Render()
 	bar := m.feed.Scrollbar() // M4a：右缘滚动条列（空串 = 该行不画）
+	// M5b：钉面板（# Todos）占消息区最上面几行，不参与滚动（高度已在 syncLayout 扣出）
+	pinned := m.renderTodosPinned(m.feed.width)
+	left := make([]string, 0, len(pinned)+len(feedLines))
+	left = append(left, pinned...)
+	left = append(left, feedLines...)
 	var panelLines []string
 	if m.panelVisible() {
-		panelLines = m.renderPanel(len(feedLines))
+		panelLines = m.renderPanel(len(left))
 	}
-	for i, ln := range feedLines {
+	for i, ln := range left {
 		// 兜底：渲染器已各自按预算折行；万一有一行超宽，右缘的滚动条列
 		// 与右栏会被"顶着"往右挪（截图上就是"右侧顶出去了"）。
 		if lipgloss.Width(ln) > m.feed.width {
 			ln = clipLine(ln, m.feed.width)
 		}
 		b := ""
-		if i < len(bar) {
-			b = bar[i]
+		if j := i - len(pinned); j >= 0 && j < len(bar) {
+			b = bar[j]
 		}
 		// 该行要画条（或右栏在那儿等着）时才补空格对齐：滚动条钉在消息区右缘
 		if b != "" || panelLines != nil {
@@ -1314,6 +1531,7 @@ func main() {
 	smokeCancel := flag.Bool("smokecancel", false, "smoke 模式：3 秒后自动取消回合（测取消链路）")
 	smokeAllow := flag.Bool("smokeallow", false, "smoke 模式：权限请求自动选“允许一次”（测审批链路）")
 	smokeDeny := flag.Bool("smokedeny", false, "smoke 模式：权限请求自动选“拒绝”（测拒绝链路）")
+	smokeElicit := flag.Bool("smokeelicit", false, "smoke 模式：追问表单自动选每題第一个选项（测 elicitation 链路）")
 	widthCk := flag.Bool("widthcheck", false, "打印关键符号的显示宽度后退出")
 	mdTest := flag.Bool("mdtest", false, "渲染样例 markdown 到 stdout（自检样式）")
 	feedTest := flag.Bool("feedtest", false, "渲染消息区样张到 stdout（自检布局）")
@@ -1326,6 +1544,12 @@ func main() {
 	histTest := flag.Bool("histtest", false, "输入历史自检（入栈/翻历史/让位滚动/编辑退出）")
 	sessTest := flag.Bool("sesstest", false, "会话列表自检（解析/触发/渲染/键位/submit 拦截）")
 	queueTest := flag.Bool("queuetest", false, "输入队列自检（忙时入队/FIFO/状态栏/转正/回合衔接）")
+	elicitTest := flag.Bool("elicittest", false, "追问面板自检（解析/渲染/键位/应答体/队列）")
+	todosTest := flag.Bool("todostest", false, "钉面板自检（渲染/超长截断/开关/布局/View 集成）")
+	themeTest := flag.Bool("themetest", false, "主题系统自检（注册表/命令/渐变/单色探测/缓存作废）")
+	echoTest := flag.Bool("echotest", false, "回显去重自检（本地回显 vs 引擎回发 user_message_chunk）")
+	compactTest := flag.Bool("compacttest", false, "压缩动画自检（/compact 识别/瞬态/下降缓动/回执/指纹）")
+	agentTest := flag.Bool("agenttest", false, "子代理增强自检（识别/信封/chips/工具卡/来源徽章）")
 	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
 	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
 	trace := flag.Bool("trace", false, "把 ACP 原始流量落盘到 acp-trace.log（排障用）")
@@ -1338,7 +1562,7 @@ func main() {
 
 	if *widthCk {
 		fmt.Println("符号宽度检查（全部应为 1 才安全）：")
-		for _, s := range []string{"\u276F", "\u23E3", "\u25C7", "\u25B8", "\u25BE", "\u00B7", "\u2503", "\u2502", "\u258C", "\u2588", "\u2591", "\u25CB", "\u25D0", "\u2713", "~", "\u2500", "\u2026"} {
+		for _, s := range []string{"\u276F", "\u23E3", "\u25C7", "\u25B8", "\u25BE", "\u00B7", "\u2503", "\u2502", "\u258C", "\u2588", "\u2591", "\u25CB", "\u25D0", "\u2713", "\u00BB", "\u203A", "~", "\u2500", "\u2026"} {
 			fmt.Printf("  %q  width=%d\n", s, lipgloss.Width(s))
 		}
 		return
@@ -1397,6 +1621,35 @@ func main() {
 		runQueueTest()
 		return
 	}
+	if *elicitTest {
+		runElicitTest()
+		return
+	}
+
+	if *todosTest {
+		runTodosTest()
+		return
+	}
+
+	if *themeTest {
+		runThemeTest()
+		return
+	}
+
+	if *echoTest {
+		runEchoTest()
+		return
+	}
+
+	if *compactTest {
+		runCompactTest()
+		return
+	}
+
+	if *agentTest {
+		runAgentTest()
+		return
+	}
 
 	if *sessions {
 		runSessionsProbe(traceTo)
@@ -1420,7 +1673,7 @@ func main() {
 		case *smokeDeny:
 			permMode = "deny"
 		}
-		runSmoke(*smoke, cancelAfter, permMode, traceTo)
+		runSmoke(*smoke, cancelAfter, permMode, *smokeElicit, traceTo)
 		return
 	}
 
@@ -1554,8 +1807,9 @@ loop:
 
 // runSmoke 在没有 TTY 的环境（比如自动化验证）里检查协议层。
 // permMode 决定权限请求怎么自动答："allow"=允许一次、"deny"=拒绝，空=回 cancelled。
+// elicitAuto=true 时追问表单自动选每题的第一个选项（测 elicitation 链路）。
 // traceTo 非空时把 ACP 原始流量落盘（-trace，语义同 StartACP）。
-func runSmoke(text string, cancelAfter time.Duration, permMode string, traceTo string) {
+func runSmoke(text string, cancelAfter time.Duration, permMode string, elicitAuto bool, traceTo string) {
 	fmt.Println("正在启动 letcode 引擎……")
 	client, err := StartACP(letcodeExe, workspace, stderrLog, traceTo)
 	if err != nil {
@@ -1584,7 +1838,7 @@ func runSmoke(text string, cancelAfter time.Duration, permMode string, traceTo s
 		for {
 			select {
 			case ev := <-client.Events:
-				handleSmokeEvent(client, ev, permMode)
+				handleSmokeEvent(client, ev, permMode, elicitAuto)
 			case <-client.Closed:
 				return
 			}
@@ -1606,7 +1860,8 @@ func runSmoke(text string, cancelAfter time.Duration, permMode string, traceTo s
 
 // handleSmokeEvent 把一条事件打印成人话（smoke 专用）。
 // permMode: "allow" 自动选 allow_once、"deny" 自动选 reject_once、空回 cancelled。
-func handleSmokeEvent(client *ACPClient, ev ACPEvent, permMode string) {
+// elicitAuto: 追问表单自动选每題第一个选项。
+func handleSmokeEvent(client *ACPClient, ev ACPEvent, permMode string, elicitAuto bool) {
 	switch ev.Method {
 	case "session/update":
 		upd := asMap(ev.Params["update"])
@@ -1659,6 +1914,30 @@ func handleSmokeEvent(client *ACPClient, ev ACPEvent, permMode string) {
 			_ = client.Respond(ev.RawID, map[string]any{
 				"outcome": map[string]any{"outcome": "cancelled"},
 			})
+		}
+
+	case "elicitation/create":
+		// 追问（M5a）：-smokeelicit 时自动选每题第一个选项，否则回 decline。
+		// 这一条同时验证"能力广告是否生效"——没广告的话引擎根本不会发这个请求。
+		req := parseElicitRequest(ev.RawID, ev.Params)
+		if !elicitAuto || req.Unsupported {
+			fmt.Printf("\n[elicitation] %q —— 自动拒绝（decline，auto=%v unsupported=%v）\n",
+				firstLine(req.Message), elicitAuto, req.Unsupported)
+			if ev.RawID != nil {
+				_ = client.Respond(ev.RawID, req.response(true))
+			}
+			return
+		}
+		for _, q := range req.Questions {
+			q.toggleAt(0)
+		}
+		payload := req.response(false)
+		fmt.Printf("\n[elicitation] %d 题 · %q —— 自动作答（accept）content=%v\n",
+			len(req.Questions), firstLine(req.Message), payload["content"])
+		if ev.RawID != nil {
+			if err := client.Respond(ev.RawID, payload); err != nil {
+				fmt.Printf("[elicitation] !! Respond 出错: %v\n", err)
+			}
 		}
 	}
 }
