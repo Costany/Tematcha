@@ -66,6 +66,81 @@ type turnResult struct {
 }
 
 // ---------------------------------------------------------------------------
+// -queuetest：输入队列自检（M3c）
+// ---------------------------------------------------------------------------
+
+// runQueueTest 断言"回合进行中提交 → 排队 → 回合结束自动接着发"的整条链路：
+//   - 忙时提交：入队 + 落 kQueued 条目（暗色、尾行「· 排队中」）、输入清空、
+//     进历史、不新开回合（busy 保持、cmd 为空）
+//   - FIFO：先交的排前面
+//   - 状态栏：「排队 N」常显，窄预算下仍保留（降级从尾部丢段）
+//   - 回合结束：队首出队 → 原地转正成 kUser（条目数不变）、自动开下一回合
+//   - 队列空：正常收尾（busy=false、无额外起点）
+func runQueueTest() {
+	failed := false
+	check := func(name string, cond bool) {
+		tag := "PASS"
+		if !cond {
+			tag = "FAIL"
+			failed = true
+		}
+		fmt.Printf("[%s] %s\n", tag, name)
+	}
+
+	// ①② 忙时提交两条 → 入队 + FIFO
+	m := model{width: 100, feed: NewFeed(), status: stThinking, busy: true}
+	m.input.SetText("第二条：等这一轮结束再发")
+	next, cmd := m.submit()
+	m = next.(model)
+	okQueued := len(m.queue) == 1 && m.feed.Len() == 1 &&
+		m.feed.items[0].Kind == kQueued && m.feed.items[0].Text == "第二条：等这一轮结束再发"
+	check("忙时提交：入队 + 落 kQueued；输入清空、进历史、不新开回合（cmd 为空）",
+		okQueued && m.input.Text() == "" && len(m.sent) == 1 && cmd == nil && m.busy && m.status == stThinking)
+
+	m.input.SetText("第三条：按顺序排")
+	next, _ = m.submit()
+	m = next.(model)
+	check("FIFO：第二条在前、第三条在后（队列长度 2）",
+		len(m.queue) == 2 && m.queue[0].Text == "第二条：等这一轮结束再发" && m.queue[1].Text == "第三条：按顺序排")
+
+	// ③ 状态栏「排队 N」（窄预算也留得住：降级从尾部丢模式/上下文/模型）
+	bar := stripANSI(m.renderStatusBar())
+	narrow := stripANSI(m.statusLeft(16))
+	check("状态栏：「排队 2」常显；预算收紧到 16 格时仍在（先丢的是尾部段）",
+		strings.Contains(bar, "排队 2") && strings.Contains(narrow, "排队 2"))
+
+	// ④ 排队条目样张：暗色竖条 + 尾行「· 排队中」
+	lines := renderItem(m.feed.items[0], 76)
+	okDim := len(lines) > 0 && strings.Contains(lines[0], "38;2;110;110;110") // dimStyle #6E6E6E
+	okTag := false
+	if len(lines) > 0 {
+		okTag = strings.Contains(stripANSI(lines[len(lines)-1]), "· 排队中")
+	}
+	fmt.Printf("  排队样张：%s\n", stripANSI(strings.Join(lines, "\n")))
+	check("样张：排队条目是暗色（非绿条）+ 尾行「· 排队中」标签", okDim && okTag)
+
+	// ⑤ 回合结束：队首转正 + 自动开下一回合（beginTurn 在无 client 时只整理状态）
+	// 此刻 feed = [排队一, 排队二]；handleTurnDone 会再落一条回合分隔行 → 3 条
+	nextM, _ := m.handleTurnDone(turnDoneMsg{reason: "end_turn"})
+	m = nextM.(model)
+	okFlip := m.feed.Len() == 3 && m.feed.items[0].Kind == kUser && m.feed.items[1].Kind == kQueued && len(m.queue) == 1
+	check("回合结束：队首出队并原地转正为 kUser（条目数不变、没多出第二条）、自动开下一回合",
+		okFlip && m.busy && m.status == stThinking && !m.turnStart.IsZero())
+
+	// ⑥ 队列空时的回合结束：正常收尾，不多开回合
+	m2 := model{width: 100, feed: NewFeed(), status: stReplying, busy: true}
+	nm, cm := m2.handleTurnDone(turnDoneMsg{reason: "end_turn"})
+	m2 = nm.(model)
+	check("队列空：回合正常收尾（busy=false、无额外起点）", !m2.busy && cm == nil && len(m2.queue) == 0)
+
+	if failed {
+		fmt.Println("queuetest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("queuetest: 全部通过")
+}
+
+// ---------------------------------------------------------------------------
 // 顶层 model
 // ---------------------------------------------------------------------------
 
@@ -150,6 +225,10 @@ type model struct {
 	// 权限流（M2a）：perm = 正在展示的请求；permQueue = 排队等待的请求
 	perm      *PermRequest
 	permQueue []*PermRequest
+
+	// M3c 输入队列：回合进行中提交的消息先排队（在消息区以 kQueued 暗色呈现），
+	// 当前回合一结束就出队转正、自动接着发——不再是"回合进行中，拒绝"。
+	queue []*FeedItem
 }
 
 func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasoning string) model {
@@ -482,20 +561,23 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// submit 发送当前输入（空文本与忙时直接忽略）。
+// submit 提交当前输入：空闲 → 直接开回合；回合进行中 → 排队（M3c）。
+// 空文本忽略；护栏拦下的命令只提示不发送。
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Text())
 	if text == "" {
 		return m, nil
 	}
-	if m.busy {
-		m.feed.Append(kSys, "回合进行中——esc 可取消当前回合，或等它结束后再发")
-		return m, nil
-	}
 
 	// M4d：/resume（不带参数）归客户端 —— 引擎只认 "/resume <session_id>"，
 	// 这里换成弹出会话选择列表，挑完再用 session/load 载入。
+	// 载入会重放历史（等于换一个会话）：回合进行中不给载，先等它结束。
 	if isResumeOnly(text) {
+		if m.busy {
+			m.feed.ScrollToBottom()
+			m.feed.Append(kSys, "回合进行中：先等它结束（或 esc 取消）再载入会话")
+			return m, nil
+		}
 		m.input.Clear()
 		m.histPush(text)
 		m.sessOn, m.sessReady, m.sessSel = true, false, 0
@@ -517,9 +599,24 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 	m.input.Clear()
 	m.histPush(text) // M4c：发送过的内容进历史（↑↓ 可召回）
+
+	// M3c：回合进行中 → 排队。消息先以 kQueued 落在消息区（暗色 +「· 排队中」），
+	// 回合结束由 handleTurnDone 出队转正（原地变回正常用户消息）并自动接着发。
+	if m.busy {
+		m.feed.ScrollToBottom()
+		m.queue = append(m.queue, m.feed.Append(kQueued, text))
+		return m, nil
+	}
+
 	m.feed.ScrollToBottom()
 	m.feed.Append(kUser, text)
+	return m.beginTurn(text)
+}
 
+// beginTurn 开一个回合：整理回合状态 + 发 Prompt，返回"等这一轮结束"的 cmd。
+// 正常发送与队列出队（M3c）共用；用户消息的落屏由调用方负责
+// （排队消息的条目早就存在，出队时只做转正）。
+func (m model) beginTurn(text string) (model, tea.Cmd) {
 	// 回合状态复位（turnStart 从这里开始计：用户发送 → 回合结束的总时长）
 	m.busy = true
 	m.status = stThinking
@@ -527,6 +624,10 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
 	m.tools = make(map[string]*FeedItem)
 
+	if m.client == nil {
+		// 自检里的无引擎 model：只整理状态，不发协议（否则会解引用空 client）
+		return m, nil
+	}
 	ch := make(chan turnResult, 1)
 	client, sid := m.client, m.sessionID
 	go func() {
@@ -534,6 +635,22 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		ch <- turnResult{reason: reason, err: err}
 	}()
 	return m, waitTurn(ch)
+}
+
+// dequeueNext 取出队首的排队消息并"转正"：Kind 换回 kUser（渲染变回绿条亮字，
+// 位置不动、不产生第二条消息），返回它的文本；队列为空时 ok=false。
+func (m *model) dequeueNext() (string, bool) {
+	if len(m.queue) == 0 {
+		return "", false
+	}
+	it := m.queue[0]
+	m.queue = m.queue[1:]
+	if it == nil {
+		return "", true
+	}
+	it.Kind = kUser
+	it.touch() // 内容版本 +1 → 渲染缓存失效，绿条亮字立刻生效
+	return it.Text, true
 }
 
 // handleTurnDone 回合结束：熄光标、定格思考计时、记状态、落回合分隔行。
@@ -560,6 +677,12 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 		dur = time.Since(m.turnStart)
 	}
 	m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
+
+	// M3c：队列里还有排队消息 → 立刻出队转正，接着开下一回合（用户不用再敲一次）
+	if text, ok := m.dequeueNext(); ok {
+		m.feed.ScrollToBottom()
+		return m.beginTurn(text)
+	}
 	return m, nil
 }
 
@@ -1202,6 +1325,7 @@ func main() {
 	cmdTest := flag.Bool("cmdtest", false, "命令弹层自检（解析/过滤/渲染/键位/模态互斥）")
 	histTest := flag.Bool("histtest", false, "输入历史自检（入栈/翻历史/让位滚动/编辑退出）")
 	sessTest := flag.Bool("sesstest", false, "会话列表自检（解析/触发/渲染/键位/submit 拦截）")
+	queueTest := flag.Bool("queuetest", false, "输入队列自检（忙时入队/FIFO/状态栏/转正/回合衔接）")
 	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
 	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
 	trace := flag.Bool("trace", false, "把 ACP 原始流量落盘到 acp-trace.log（排障用）")
@@ -1266,6 +1390,11 @@ func main() {
 
 	if *sessTest {
 		runSessTest()
+		return
+	}
+
+	if *queueTest {
+		runQueueTest()
 		return
 	}
 

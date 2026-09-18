@@ -253,6 +253,11 @@ func (m model) statusLeft(budget int) string {
 	}
 
 	segs := []string{m.engineStateText()}
+	// M3c 输入队列：排队中的消息数（回合结束会自动接着发）。
+	// 放在状态词后面——窄屏降级从尾部丢段，它会比模式/上下文/模型留得久。
+	if n := len(m.queue); n > 0 {
+		segs = append(segs, warnStyle.Render(fmt.Sprintf("排队 %d", n)))
+	}
 	if s := m.renderModeBadge(); s != "" {
 		segs = append(segs, s)
 	}

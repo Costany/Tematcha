@@ -70,6 +70,7 @@ const (
 	kTurn    // 回合分隔行：◇ 模型 via 供应商 in 总耗时
 	kReceipt // 审批回执：绿条 ▌ + 说明（§1.6）
 	kWarn    // 客户端护栏提示（M4e）：琥珀 ! 前缀——引擎必拒的命令形态提前拦下
+	kQueued  // 排队中的用户消息（M3c）：暗色，回合结束后原地转正为 kUser
 )
 
 // FeedItem 是消息区里的一条消息。
@@ -482,6 +483,9 @@ func renderItem(it *FeedItem, w int) []string {
 	case kWarn:
 		// M4e 命令护栏：琥珀 ! + 正文（不是错误——是把引擎必拒的话本地说清）。
 		return labeled("!", 1, w, it.Text, warnStyle, warnStyle)
+	case kQueued:
+		// M3c 排队中的用户消息：暗色竖条 + 暗字（转正后原地变回绿条亮字）
+		return queuedLines(it, w)
 	case kTurn:
 		return turnLines(it, w)
 	case kReceipt:
@@ -502,6 +506,30 @@ func receiptLines(it *FeedItem, w int) []string {
 	}
 	if len(out) == 0 {
 		out = append(out, "  "+userBarStyle.Render("\u258C"))
+	}
+	return out
+}
+
+// queuedLines 排队中的用户消息（M3c）：形态与用户消息一致（竖条 + 正文、多行对齐），
+// 但整体是暗色——绿条换成暗灰竖条、亮字换成暗字，表示"还没发出去"。
+// 尾行右侧放得下时挂一个「· 排队中」标签（放不下就只靠颜色 + 状态栏的「排队 N」）。
+//
+// 出队转正时它会被原地换成 kUser（绿条 + 亮字），位置不动——不会像"重新发一条"
+// 那样在消息区留下两份（老实现里这正是用户看到的"消息重复"）。
+func queuedLines(it *FeedItem, w int) []string {
+	textW := w - 4
+	if textW < 8 {
+		textW = 8
+	}
+	var out []string
+	for _, ln := range wrapText(it.Text, textW) {
+		out = append(out, "  "+dimStyle.Render("\u2502")+" "+dimStyle.Render(ln))
+	}
+	if len(out) == 0 {
+		out = append(out, "  "+dimStyle.Render("\u2502"))
+	}
+	if tag := " \u00B7 排队中"; lipgloss.Width(out[len(out)-1])+lipgloss.Width(tag) <= w {
+		out[len(out)-1] += dimStyle.Render(tag)
 	}
 	return out
 }
@@ -955,6 +983,12 @@ func runFeedTest() {
 			// 命令护栏提示（M4e）：琥珀 ! 前缀
 			Kind: kWarn,
 			Text: "「/reasoning」还缺参数：off|none|minimal|low|medium|high|xhigh —— 敲 / 打开命令列表，选中回车即可补全",
+		},
+		{
+			// M3c 队列样张：排队中的用户消息（暗色竖条 + 尾行「· 排队中」；
+			// 回合结束出队时原地转正成 kUser，位置不动、不产生第二条）
+			Kind: kQueued,
+			Text: "这条是回合进行中排队的消息：等当前回合结束后会自动接着发送，出队时原地转正。",
 		},
 		{Kind: kUsage, Text: "用量 394 / 320000"},
 		{Kind: kTurn, Text: turnSummaryLine("Step 3.7 Flash", "guji", 12*time.Second)},
