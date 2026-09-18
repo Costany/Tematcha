@@ -23,7 +23,7 @@
 // （clientCapabilities.elicitation.form = {}）；否则引擎把 question 工具判成
 // \"the ACP client does not support form elicitation\" 并自动婉拒（QUESTIONS_UNSUPPORTED）。
 //
-// 透明度原则：只前景色，面板左缘一条琥珀竖条当\"面板边\"（同权限面板）。
+// 透明度原则：只前景色，面板左缘一条强调绿竖条当"面板边"（权限面板用琥珀，颜色区分语义）。
 package main
 
 import (
@@ -55,12 +55,17 @@ type ElicitQuestion struct {
 	cursor   int          // 光标所在选项
 	chosen   int          // 单选：已选项下标（-1 = 未答）
 	selected map[int]bool // 多选：已勾选集合
+	Text     string       // 自己写的答案（按 0 进入输入；引擎只验非空，任意文本都接受）
+	TextMode bool         // 正在输入自定义答案
 }
 
-// answered 这道题是否已作答。
+// answered 这道题是否已作答（选了选项或自己写了答案都算）。
 func (q *ElicitQuestion) answered() bool {
+	if strings.TrimSpace(q.Text) != "" {
+		return true
+	}
 	if len(q.Options) == 0 {
-		return true // 没有可选项的题（理论上不会出现）不阻塞提交
+		return false // 纯自由输入题：必须自己写
 	}
 	if q.Multiple {
 		for _, v := range q.selected {
@@ -91,6 +96,7 @@ func (q *ElicitQuestion) toggleAt(i int) {
 		q.selected[i] = !q.selected[i]
 	} else {
 		q.chosen = i
+		q.Text, q.TextMode = "", false // 单选选定后放弃自定义文本，避免双答案歧义
 	}
 }
 
@@ -101,6 +107,9 @@ func (q *ElicitQuestion) answerText() string {
 		if q.choiceAt(i) {
 			parts = append(parts, o.Title)
 		}
+	}
+	if t := strings.TrimSpace(q.Text); t != "" {
+		parts = append(parts, t)
 	}
 	return strings.Join(parts, "、")
 }
@@ -238,6 +247,9 @@ func (e *ElicitRequest) response(decline bool) map[string]any {
 					labels = append(labels, o.Value)
 				}
 			}
+			if t := strings.TrimSpace(q.Text); t != "" {
+				labels = append(labels, t)
+			}
 			if len(labels) > 0 {
 				content[q.Key] = labels
 			}
@@ -245,6 +257,8 @@ func (e *ElicitRequest) response(decline bool) map[string]any {
 		}
 		if q.chosen >= 0 && q.chosen < len(q.Options) {
 			content[q.Key] = q.Options[q.chosen].Value
+		} else if t := strings.TrimSpace(q.Text); t != "" {
+			content[q.Key] = t
 		}
 	}
 	return map[string]any{"action": "accept", "content": content}
@@ -328,7 +342,9 @@ func (m *model) elicitSubmit() {
 	if e == nil {
 		return
 	}
-	_ = m.client.Respond(e.RPCID, e.response(false))
+	if m.client != nil { // 自检里 client 为 nil：只验应答组装，不发引擎
+		_ = m.client.Respond(e.RPCID, e.response(false))
+	}
 	m.settleElicit(e, "已回答", fmt.Sprintf("%d 题 \u00B7 %s", len(e.Questions), e.answerSummary()))
 }
 
@@ -338,7 +354,9 @@ func (m *model) elicitDecline() {
 	if e == nil {
 		return
 	}
-	_ = m.client.Respond(e.RPCID, e.response(true))
+	if m.client != nil {
+		_ = m.client.Respond(e.RPCID, e.response(true))
+	}
 	m.settleElicit(e, "已拒绝回答", clipWidth(firstLine(e.Message), 48))
 }
 
@@ -348,8 +366,9 @@ func (m *model) elicitDecline() {
 //	←→/tab   换题（shift+tab 反向）
 //	space    勾选 / 选中当前选项（多选=切换，单选=选中）
 //	1..9     直接选第 N 个选项（单选选中后自动跳到下一道未答题）
+//	0        自己写：进入自定义答案输入（enter 确认；再按 esc 退出输入态）
 //	enter    全部答完 → 提交；否则跳到下一道未答题
-//	esc      拒绝回答（decline）
+//	esc      拒绝回答（decline；输入态下先退出输入态）
 func (m *model) elicitKey(k tea.KeyPressMsg) bool {
 	e := m.elicit
 	if e == nil {
@@ -363,6 +382,36 @@ func (m *model) elicitKey(k tea.KeyPressMsg) bool {
 	}
 	q := e.Questions[e.Cur]
 	key := k.String()
+
+	// 自己写模式：可打印字符入缓冲、backspace 删除；enter 确认后跳题或提交。
+	// ↑↓/←→/tab 先退出输入态再走常规导航；esc 先退出输入态（再按才是拒绝）。
+	if q.TextMode {
+		switch key {
+		case "enter":
+			q.TextMode = false
+			if e.allAnswered() {
+				m.elicitSubmit()
+				return true
+			}
+			m.jumpToUnanswered()
+			return true
+		case "backspace":
+			if r := []rune(q.Text); len(r) > 0 {
+				q.Text = string(r[:len(r)-1])
+			}
+			return true
+		case "esc":
+			q.TextMode = false
+			return true
+		case "up", "down", "left", "right", "tab", "shift+tab":
+			q.TextMode = false
+		default:
+			if k.Text != "" {
+				q.Text = clipWidth(q.Text+k.Text, 120)
+			}
+			return true
+		}
+	}
 
 	switch key {
 	case "esc":
@@ -400,6 +449,13 @@ func (m *model) elicitKey(k tea.KeyPressMsg) bool {
 		q.toggleAt(q.cursor)
 		if !q.Multiple {
 			m.jumpToUnanswered()
+		}
+		return true
+	}
+	if key == "0" { // 自己写：进入自定义答案输入（单选会先清掉已选项）
+		q.TextMode = true
+		if !q.Multiple {
+			q.chosen = -1
 		}
 		return true
 	}
@@ -453,14 +509,16 @@ func (m *model) jumpToUnanswered() {
 
 // renderElicitPanel 渲染追问面板（钉在输入区上方）：
 //
-//	┃ 追问 2 题 · <message 首行>
+//	┃ 第 1/2 题 · <message 首行>          （强调绿标题 + 边条）
 //	┃ ▸ 1/2 <题面标题>
 //	┃     <题面说明（折行）>
 //	┃     ❯ 1) <选项标题>  <选项说明（暗色）>
 //	┃       2) <选项标题>
+//	┃       0 自己写…                    ← 自定义答案（enter 确认）
 //	┃   ▸ 2/2 <题面标题>            ← 非当前题只留题头一行
 //	┃     ✓ 已答：<选项标题>
-//	┃ space 选/勾 · ↑↓ 移动 · ←→ 换题 · enter 提交 · esc 拒绝
+//	┃ （空一行）
+//	┃ space 选/勾 · 0 自己写 · ↑↓ 移动 · ←→ 换题 · enter 提交 · esc 拒绝（整行暗色）
 //
 // 透明度原则：只前景色；左缘琥珀竖条当"面板边"（无底色）。
 func (m *model) renderElicitPanel(w int) []string {
@@ -468,18 +526,22 @@ func (m *model) renderElicitPanel(w int) []string {
 	if e == nil || e.Unsupported {
 		return nil
 	}
-	gutter := "  " + warnStyle.Render("\u2503") + " "
+	gutter := "  " + accentStyle.Render("\u2503") + " " // 边条用强调绿（鲜艳档），区别于权限面板的琥珀
 	textW := w - 4
 	if textW < 12 {
 		textW = 12
 	}
 	var out []string
 
-	head := warnStyle.Render(fmt.Sprintf("追问 %d 题", len(e.Questions)))
-	if s := firstLine(e.Message); s != "" {
-		head += dimStyle.Render(" \u00B7 ") + textStyle.Render(clipWidth(s, textW-12))
+	head := fmt.Sprintf("第 %d 题", e.Cur+1)
+	if len(e.Questions) > 1 {
+		head = fmt.Sprintf("第 %d/%d 题", e.Cur+1, len(e.Questions))
 	}
-	out = append(out, gutter+head)
+	headLine := accentStyle.Bold(true).Render(head)
+	if s := firstLine(e.Message); s != "" {
+		headLine += dimStyle.Render(" \u00B7 ") + textStyle.Render(clipWidth(s, textW-12))
+	}
+	out = append(out, gutter+headLine)
 
 	for i, q := range e.Questions {
 		cur := i == e.Cur
@@ -489,7 +551,7 @@ func (m *model) renderElicitPanel(w int) []string {
 		}
 		title := dimStyle.Render(fmt.Sprintf("%d/%d ", i+1, len(e.Questions))) + textStyle.Render(clipWidth(q.Title, textW-12))
 		if cur {
-			title = dimStyle.Render(fmt.Sprintf("%d/%d ", i+1, len(e.Questions))) + warnStyle.Render(clipWidth(q.Title, textW-12))
+			title = dimStyle.Render(fmt.Sprintf("%d/%d ", i+1, len(e.Questions))) + accentStyle.Render(clipWidth(q.Title, textW-12))
 		}
 		out = append(out, gutter+mark+title)
 
@@ -528,14 +590,27 @@ func (m *model) renderElicitPanel(w int) []string {
 			}
 			out = append(out, line)
 		}
+
+		// 自己写（0 号伪选项）：引擎只验答案非空，自定义文本照样接受
+		switch {
+		case q.TextMode:
+			out = append(out, gutter+"    "+userBarStyle.Render("\u276F")+" "+inputTextStyle.Render("自己写："+q.Text)+"\u258C")
+		case strings.TrimSpace(q.Text) != "":
+			out = append(out, gutter+"    "+userBarStyle.Render("\u2713")+" "+textStyle.Render("自己写："+clipWidth(q.Text, textW-16)))
+		default:
+			out = append(out, gutter+"    "+dimStyle.Render("0")+" "+dimStyle.Render("自己写…"))
+		}
 	}
 
+	// 键位提示：与选项之间空一行（边条保持连续），整行调暗不与选项抢眼
+	out = append(out, strings.TrimRight(gutter, " "))
 	hints := []string{
-		warnStyle.Render("space") + " " + textStyle.Render("选/勾"),
-		warnStyle.Render("\u2191\u2193") + " " + textStyle.Render("移动"),
-		warnStyle.Render("\u2190\u2192") + " " + textStyle.Render("换题"),
-		warnStyle.Render("enter") + " " + textStyle.Render("提交"),
-		warnStyle.Render("esc") + " " + textStyle.Render("拒绝"),
+		dimStyle.Render("space") + " " + dimStyle.Render("选/勾"),
+		dimStyle.Render("0") + " " + dimStyle.Render("自己写"),
+		dimStyle.Render("\u2191\u2193") + " " + dimStyle.Render("移动"),
+		dimStyle.Render("\u2190\u2192") + " " + dimStyle.Render("换题"),
+		dimStyle.Render("enter") + " " + dimStyle.Render("提交"),
+		dimStyle.Render("esc") + " " + dimStyle.Render("拒绝"),
 	}
 	out = append(out, gutter+strings.Join(hints, dimStyle.Render(" \u00B7 ")))
 	if n := len(m.elicitQueue); n > 0 {
@@ -557,12 +632,12 @@ func firstLine(s string) string {
 // ---------------------------------------------------------------------------
 
 // elicitSampleParams 用 letcode question 工具的真实形状造一条 elicitation/create：
-// 两道题（单选 + 多选），message 是两题按行拼接。
+// 三道题（单选 + 多选 + 无 oneOf 的自由输入题），message 是各题按行拼接。
 func elicitSampleParams() map[string]any {
 	return map[string]any{
 		"sessionId": "1789723456789-9999-0",
 		"mode":      "form",
-		"message":   "你希望用哪种语言实现？\n要不要顺带补测试？",
+		"message":   "你希望用哪种语言实现？\n要不要顺带补测试？\n还有什么想补充的？",
 		"requestedSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -589,8 +664,13 @@ func elicitSampleParams() map[string]any {
 						},
 					},
 				},
+				"question_3": map[string]any{
+					"type":        "string",
+					"title":       "补充",
+					"description": "还有什么想补充的？",
+				},
 			},
-			"required": []any{"question_1", "question_2"},
+			"required": []any{"question_1", "question_2", "question_3"},
 		},
 	}
 }
@@ -609,12 +689,13 @@ func runElicitTest() {
 
 	// ① 解析
 	e := parseElicitRequest(float64(7), elicitSampleParams())
-	okParse := !e.Unsupported && len(e.Questions) == 2 &&
+	okParse := !e.Unsupported && len(e.Questions) == 3 &&
 		e.Questions[0].Key == "question_1" && e.Questions[0].Title == "语言" && !e.Questions[0].Multiple &&
 		len(e.Questions[0].Options) == 3 && e.Questions[0].Options[0].Value == "Rust" &&
 		e.Questions[0].Options[0].Desc == "系统级、无 GC" &&
-		e.Questions[1].Multiple && len(e.Questions[1].Options) == 2
-	check("解析：2 题（单选+多选）、标题/说明/oneOf 取值与说明各就位", okParse)
+		e.Questions[1].Multiple && len(e.Questions[1].Options) == 2 &&
+		e.Questions[2].Title == "补充" && len(e.Questions[2].Options) == 0
+	check("解析：3 题（单选+多选+自由输入）、标题/说明/oneOf 取值与说明各就位", okParse)
 
 	// ② 非 form（url）与空表单：判为不支持，直接回 cancel
 	urlReq := parseElicitRequest(nil, map[string]any{"mode": "url", "message": "x"})
@@ -634,16 +715,17 @@ func runElicitTest() {
 		}
 	}
 	joined := stripANSI(strings.Join(lines, "\n"))
-	okContent := strings.Contains(joined, "追问 2 题") && strings.Contains(joined, "语言") &&
+	okContent := strings.Contains(joined, "第 1/3 题") && strings.Contains(joined, "语言") &&
 		strings.Contains(joined, "Rust") && strings.Contains(joined, "1)") && strings.Contains(joined, "2)") &&
-		strings.Contains(joined, "esc") && strings.Contains(joined, "enter")
+		strings.Contains(joined, "自己写") && strings.Contains(joined, "esc") && strings.Contains(joined, "enter")
+	okAccent := strings.Contains(strings.Join(lines, "\n"), "38;2;78;224;94") // 边条/标题 = 强调绿（鲜艳档）
 	fmt.Println("== 追问面板样张（宽 100）==")
 	for _, ln := range lines {
 		fmt.Printf("  %s\n", stripANSI(ln))
 	}
-	check("渲染：宽度合规 / 无背景色 / 题面+选项+键位提示齐全", okW && okBG && okContent)
+	check("渲染：宽度合规 / 无背景色 / 边条强调绿 / 题面+选项+自写行+键位提示齐全", okW && okBG && okContent && okAccent)
 
-	// ④ 键位：↑↓ 移动、space 选中、自动跳下一题、enter 提交、esc 拒绝
+	// ④ 键位：↑↓ 移动、space 选中、自动跳题、enter 跳未答/提交、0 自己写
 	next := model{width: 100, feed: NewFeed(), status: stIdle, elicit: e}
 	key := func(mm model, code rune, text string) model {
 		mm.elicitKey(press(code, text))
@@ -657,16 +739,25 @@ func runElicitTest() {
 	next = key(next, tea.KeyDown, "")
 	next = key(next, tea.KeySpace, " ")
 	okMulti := next.elicit.Questions[1].choiceAt(0) && next.elicit.Questions[1].choiceAt(1)
-	okAll := next.elicit.allAnswered()
-	check("键位：↑↓ 移动 / space 选中并自动跳下一题 / 多选可勾多项", okCursor && okPick && okMulti && okAll)
+	next = key(next, tea.KeyEnter, "") // 没答完 → 跳到下一道未答题（自由输入题）
+	okJump := next.elicit.Cur == 2
+	next = key(next, '0', "0") // 自己写：进入输入态（真实终端 0 = 带 Text 的 rune 键）
+	okTextMode := next.elicit.Questions[2].TextMode
+	next = key(next, 0, "好的")
+	okTyped := next.elicit.Questions[2].Text == "好的" // 输入态下缓冲实时入账（enter 才确认退出）
+	next = key(next, tea.KeyEnter, "")               // 全答完 → 提交收桌（自检 client 为 nil，只走应答组装）
+	okSubmitted := next.elicit == nil && e.Questions[2].Text == "好的"
+	check("键位：↑↓/space 选项与自动跳题 / enter 跳未答 / 0 自己写中文 / 答完 enter 提交收桌",
+		okCursor && okPick && okMulti && okJump && okTextMode && okTyped && okSubmitted)
 
-	// ⑤ 应答体（accept）形状：单选是字符串、多选是字符串数组
+	// ⑤ 应答体（accept）形状：单选=字符串、多选=数组、自写=原文
 	payload := e.response(false)
 	content := asMap(payload["content"])
 	_, isStr := content["question_1"].(string)
 	arr, isArr := content["question_2"].([]string)
-	okPayload := payload["action"] == "accept" && isStr && isArr && len(arr) == 2
-	check("应答体：accept + content（单选=字符串 / 多选=字符串数组）", okPayload)
+	txt3, isTxt := content["question_3"].(string)
+	okPayload := payload["action"] == "accept" && isStr && isArr && len(arr) == 2 && isTxt && txt3 == "好的"
+	check("应答体：accept + content（单选=字符串 / 多选=数组 / 自写=原文）", okPayload)
 
 	// ⑥ esc → decline；未答的题不进 content
 	e2 := parseElicitRequest(float64(8), elicitSampleParams())
@@ -675,8 +766,9 @@ func runElicitTest() {
 	part := asMap(e2.response(false)["content"])
 	_, onlyFirst := part["question_1"]
 	_, noSecond := part["question_2"]
+	_, noThird := part["question_3"]
 	check("拒绝：action=decline；accept 时未作答的题不进 content",
-		decl["action"] == "decline" && onlyFirst && !noSecond)
+		decl["action"] == "decline" && onlyFirst && !noSecond && !noThird)
 
 	// ⑦ 队列：第二条追问排队，答完第一条自动上桌
 	mq := model{width: 100, feed: NewFeed(), status: stIdle}
@@ -703,7 +795,7 @@ func runElicitTest() {
 		content := vm.View().Content
 		viewLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 		okRows := len(viewLines) == vm.height
-		okShow := strings.Contains(stripANSI(content), "追问 2 题") &&
+		okShow := strings.Contains(stripANSI(content), "第 1/3 题") &&
 			strings.Contains(stripANSI(content), "Rust")
 		okVW := true
 		for _, ln := range viewLines {

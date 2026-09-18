@@ -145,22 +145,25 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
   - 能力广告：`initialize` 的 `clientCapabilities.elicitation.form = {}` —— 不广告的话引擎把 question 工具直接判为 `the ACP client does not support form elicitation` 并自动婉拒
   - 引擎 → 客户端（反向请求 `elicitation/create`）：`{sessionId, mode:"form", message, requestedSchema:{type:"object", properties:{"question_N":{type,title,description,oneOf:[{const,title,description}]}}, required:[…]}}`；`type=array` = 多选（选项在 `items.oneOf`）
   - 客户端 → 引擎：`{"action":"accept","content":{"question_1":"<标签>","question_2":["<标签>",…]}}`（单选=字符串、多选=字符串数组；未作答的题不进 content）；`{"action":"decline"}`（用户不想答）；`{"action":"cancel"}`（客户端取消/不支持的 mode）
-- 面板形态（钉在输入区上方，与权限面板同一套"钉子位"；左缘琥珀竖条、无底色）：
+- 面板形态（钉在输入区上方，与权限面板同一套"钉子位"；左缘**强调绿**竖条、无底色 —— 与权限面板的琥珀区分语义：绿=交流提问，琥珀=需要批准；**M7 重定调，2026-09-19**）：
 
 ```
-  ┃ 追问 2 题 · <message 首行>
+  ┃ 第 1/2 题 · <message 首行>        ← 强调绿加粗标题；单题时只写「第 1 题」
   ┃ ▸ 1/2 <题面标题>
   ┃     <题面说明（折行）>
   ┃     ❯ 1) <选项标题>  <选项说明（暗色）>
   ┃       2) <选项标题>
+  ┃       0 自己写…                  ← 自定义答案入口（M7）
   ┃   2/2 <题面标题>     ← 非当前题只留题头（已答时补一行 ✓ 已答：<选项>）
-  ┃ space 选/勾 · ↑↓ 移动 · ←→ 换题 · enter 提交 · esc 拒绝
+  ┃ （空一行）
+  ┃ space 选/勾 · 0 自己写 · ↑↓ 移动 · ←→ 换题 · enter 提交 · esc 拒绝   ← 整行暗色，与选项拉开
 ```
 
-- 键位：`↑↓` 选项移动 / `←→`·`tab`·`shift+tab` 换题 / `space` 勾选（多选切换、单选选中后自动跳下一道未答题）/ `1..9` 直选 / `enter` 全答完则提交、否则跳下一道未答题 / `esc` 拒绝（回 decline）
+- 键位：`↑↓` 选项移动 / `←→`·`tab`·`shift+tab` 换题 / `space` 勾选（多选切换、单选选中后自动跳下一道未答题）/ `1..9` 直选 / `0` **自己写**（M7 新增：进入自定义答案输入态，可打印字符入缓冲、backspace 删除、enter 确认后跳题或提交；单选进入时会清掉已选项避免双答案；esc 在输入态先退出输入态、再按才是拒绝）/ `enter` 全答完则提交、否则跳下一道未答题 / `esc` 拒绝（回 decline）
+- **自己写（M7 · 引擎依据）**：letcode `question.rs` 里 `options` 虽为必填，但 `validate_question_response` 只校验答案**非空且数量匹配**（单选 ≤1），不限制必须来自选项 —— 自定义文本是引擎原生接受的答案；accept content 里原样回传文本（多选题 = 已勾选项 + 自写文本一起进数组）
 - 占位与回执：消息区先落暗色 `→ 等待回答… <message 首行>`；提交后原地换绿条 `已回答 · N 题 · 题1=…`，拒绝换 `已拒绝回答 · …`
 - 边界：不认识的 mode（url）直接回 `cancel`（不渲染面板）；回合结束/引擎断开时丢弃未答表单（同权限面板）
-- 自检：`-elicittest`（7 项：解析/url 不支持/渲染宽度无背景/键位/accept 体形状/decline + 未答不进 content/队列）；真机探针：`-smokeelicit -smoke "…用 question 工具问我…"` → 实测引擎发 `elicitation/create`、自动作答后 `question 2 fields (completed)`
+- 自检：`-elicittest`（8 项：解析含自由输入题/url 不支持/渲染含边条强调绿与自写行/键位含 0 自写中文与提交收桌/accept 体形状含自写=原文/decline + 未答不进 content/队列/View 集成行数守恒）；真机探针：`-smokeelicit -smoke "…用 question 工具问我…"` → 实测引擎发 `elicitation/create`、自动作答后 `question 2 fields (completed)`
 
 ## 3. 状态栏
 

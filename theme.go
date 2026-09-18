@@ -146,6 +146,7 @@ func applyTheme(t Theme) {
 	// 消息区
 	textStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Text))
 	userBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent))
+	accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent))
 	thoughtPre = lipgloss.NewStyle().Foreground(lipgloss.Color(t.ThoughtPre))
 	thoughtTtl = lipgloss.NewStyle().Foreground(lipgloss.Color(t.ThoughtTtl))
 	thoughtTxt = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Faint))

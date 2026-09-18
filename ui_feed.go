@@ -40,6 +40,7 @@ var (
 	toolOutStyle lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
 	dimStyle     lipgloss.Style // 次要信息
 	errStyle     lipgloss.Style // 错误（柔红）
+	accentStyle  lipgloss.Style // 强调色（追问面板边条/标题等小面积强调）
 
 	// 光标：反色格子 —— 与主题无关（反色不是颜色）
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
