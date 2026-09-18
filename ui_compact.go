@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"strings"
 
@@ -30,11 +31,13 @@ func isCompactCmd(text string) bool {
 	return strings.TrimSpace(text) == "/compact"
 }
 
-// compactScanBar 跳跃小条：暗槽 + 一个沿轨道来回滑动的亮点
-// （compact-bar 手艺的轻量版；位置由 500ms 心跳的 blinkN 驱动）。
-// 宽度恒为 compactBarW，永不超预算。
+// compactScanBar 压缩条（M6 升级）：8 格主题渐变底 + 一条来回扫描的高光带。
+// 手艺来自 study\compact-bar 学习项目：渐变色板走 lipgloss.Blend1D（CIELAB 插值），
+// 高光带用亮度缩放——压暗底色、点亮光心；位置由 500ms 心跳的 blinkN 驱动。
+// 宽度恒为 compactBarW、只用前景色（透明度原则）；mono 主题下自动变全灰。
 func compactScanBar(step int) string {
 	n := compactBarW
+	base := contextBarGrad(n) // 主题渐变（A→B→C；结果按主题名缓存）
 	period := 2*n - 2
 	if period <= 0 {
 		period = 1
@@ -45,13 +48,29 @@ func compactScanBar(step int) string {
 	}
 	var b strings.Builder
 	for i := 0; i < n; i++ {
-		if i == pos {
-			b.WriteString(userBarStyle.Render("\u2588")) // █ 亮点（强调绿）
-		} else {
-			b.WriteString(ruleStyle.Render("\u2591")) // ░ 暗槽
+		k := 0.34 // 底色：压暗，让光带跳出来
+		switch d := i - pos; {
+		case d == 0:
+			k = 1.0 // 光心：原亮度
+		case d == 1 || d == -1:
+			k = 0.66 // 光晕：半亮
 		}
+		b.WriteString(lipgloss.NewStyle().Foreground(scaleBright(base[i], k)).Render("\u2588"))
 	}
 	return b.String()
+}
+
+// scaleBright 把颜色按系数缩放亮度（k<1 压暗、k>1 提亮，色相不变）。
+func scaleBright(c color.Color, k float64) color.Color {
+	r, g, bl, a := c.RGBA()
+	f := func(v uint32) uint8 {
+		x := float64(v) * k
+		if x > 65535 {
+			x = 65535
+		}
+		return uint8(x / 256)
+	}
+	return color.RGBA{R: f(r), G: f(g), B: f(bl), A: uint8(a / 256)}
 }
 
 // compactStateText 压缩进行中的状态词（占引擎状态位）。
@@ -188,8 +207,28 @@ func runCompactTest() {
 		lipgloss.Width(line) == 110 && !hasBackgroundColor(line)
 	bar0, bar4 := compactScanBar(0), compactScanBar(4)
 	okScan := lipgloss.Width(bar0) == compactBarW && bar0 != bar4
-	check("瞬态：状态栏「正在整理上下文」+ 跳跃小条（8 格、逐帧移动、宽度守恒）",
+	check("瞬态：状态栏「正在整理上下文」+ 扫描条（8 格、逐帧移动、宽度守恒）",
 		okBar && okScan)
+
+	// M6：扫描条 = 主题渐变（≥3 种颜色）+ 光带逐格移动（同格亮度随帧变化）
+	{
+		colors := map[string]bool{}
+		for _, c := range rgbRe.FindAllString(compactScanBar(0), -1) {
+			colors[c] = true
+		}
+		okGrad := len(colors) >= 3 // 8 格渐变（底色 + 光带三段亮度）应出多色
+
+		moved := false
+		c0 := rgbRe.FindAllString(compactScanBar(0), -1)
+		c4 := rgbRe.FindAllString(compactScanBar(4), -1)
+		for i := 0; i < len(c0) && i < len(c4); i++ {
+			if c0[i] != c4[i] {
+				moved = true
+				break
+			}
+		}
+		check("渐变：8 格扫描条为多色渐变 + 光带逐格移动（亮度随位置变化）", okGrad && moved)
+	}
 
 	// ③ usage 明显下降：缓动 + 回执（手动措辞）；心跳推进到目标
 	md := model{width: 110, feed: NewFeed(), status: stReplying, busy: true, compactReq: true,

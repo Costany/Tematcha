@@ -13,4 +13,4 @@
 go run .
 ```
 
-引擎路径和工作区目前写在 `main.go` 的常量里。无 TTY 自检：`-widthcheck`、`-mdtest`、`-feedtest`、`-permtest`、`-navtest`、`-statustest`、`-paneltest`、`-scrolltest`、`-cmdtest`、`-histtest`、`-sesstest`、`-queuetest`、`-todostest`、`-themetest`、`-compacttest`、`-agenttest`、`-echotest`、`-elicittest`；真机探针（起引擎但不进 TUI）：`-sessions`（列会话）、`-load <sessionId>`（载入并统计重放）。
+引擎路径和工作区目前写在 `main.go` 的常量里。无 TTY 自检：`-widthcheck`、`-mdtest`、`-feedtest`、`-permtest`、`-navtest`、`-statustest`、`-paneltest`、`-scrolltest`、`-cmdtest`、`-histtest`、`-sesstest`、`-queuetest`、`-todostest`、`-themetest`、`-compacttest`、`-agenttest`、`-echotest`、`-elicittest`、`-copytest`；真机探针（起引擎但不进 TUI）：`-sessions`（列会话）、`-load <sessionId>`（载入并统计重放）。

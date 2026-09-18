@@ -15,6 +15,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -45,12 +46,14 @@ func (m *model) enterCardNav() {
 		}
 	}
 	m.setCardNav(pick)
+	m.feed.aggDisabled = true // M6：选择态禁用聚合折叠（逐卡导航不能有行合并）
 	m.feed.ScrollToItem(pick)
 }
 
-// exitCardNav 退出选择态（清掉选中标记）。
+// exitCardNav 退出选择态（清掉选中标记；恢复聚合折叠）。
 func (m *model) exitCardNav() {
 	m.setCardNav(nil)
+	m.feed.aggDisabled = false
 }
 
 // setCardNav 换当前选中的卡（nil = 退出）：只动标记并让渲染缓存失效。
@@ -111,6 +114,22 @@ func (m *model) cardNavToggle() {
 	it.ToolExpanded = !it.ToolExpanded
 	it.ToolUserSet = true
 	it.touch()
+}
+
+// cardNavCopy 复制当前选中的卡到系统剪贴板（M6 · ctrl+y）。
+// 与鼠标右键复制共用 copyTextFor / clipboardCmd（见 ui_copy.go）。
+func (m *model) cardNavCopy() tea.Cmd {
+	it := m.cardNav
+	if it == nil {
+		return nil
+	}
+	text := copyTextFor(it)
+	if text == "" {
+		m.feed.Append(kWarn, "这张卡没有可复制的内容")
+		return nil
+	}
+	m.feed.Append(kSys, "已复制工具卡内容（"+fmt.Sprintf("%d", len([]rune(text)))+" 字）")
+	return clipboardCmd(text)
 }
 
 // cardNavPos 当前选中在候选里的位置（1 起；不在候选里返回 0）。
@@ -235,6 +254,21 @@ func runNavTest() {
 	})
 	t3 := m4.tools["t3"]
 	check("引擎 failed → ToolBad（照旧）", t3 != nil && t3.ToolBad)
+
+	// ⑪ M6：ctrl+y 复制选中卡（键盘路由 → cardNavCopy：回执落行 + 复制文本含命令/输出）
+	m5 := newM()
+	m5.tools = map[string]*FeedItem{}
+	c5 := m5.feed.Append(kTool, "")
+	c5.ToolName, c5.ToolCall, c5.ToolCmd, c5.ToolOut = "fs__read", "fs__read x.txt", "cat x.txt", "ok"
+	c5.ToolState = "completed"
+	m5 = key(m5, tea.KeyTab, "")
+	next5, cmd5 := m5.handleKey(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	m5 = next5.(model)
+	last5 := m5.feed.Last()
+	okCopy := cmd5 != nil && last5 != nil && last5.Kind == kSys &&
+		strings.Contains(last5.Text, "已复制工具卡内容") &&
+		strings.Contains(copyTextFor(c5), "cat x.txt")
+	check("ctrl+y：复制选中卡（回执 + 复制文本含命令与输出）", okCopy)
 
 	if failed {
 		fmt.Println("navtest: 有失败项")

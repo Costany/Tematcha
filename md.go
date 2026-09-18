@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -48,6 +49,19 @@ func transparentDarkStyle() ansi.StyleConfig {
 	// 行内代码颜色：glamour dark 原样是 256 色 203（粉红 #FF5F87），
 	// 用户要求换成绿色 —— 用主题的强调绿（sprout = #00E7A4，与用户消息竖条同色）。
 	s.Code.Color = sptr(activeTheme.Accent)
+
+	// M6 全量主题化：标题 / 链接 / 斜体接入主题（此前只有行内代码与粗体）。
+	// 只覆盖颜色，其余形态沿用 dark 样式；H1 的暗色底已在上方清掉。
+	s.Heading.Color = sptr(activeTheme.Heading)
+	s.H1.Color = sptr(activeTheme.Heading)
+	s.H2.Color = sptr(activeTheme.Heading)
+	s.H3.Color = sptr(activeTheme.Heading)
+	s.H4.Color = sptr(activeTheme.Heading)
+	s.H5.Color = sptr(activeTheme.Heading)
+	s.H6.Color = sptr(activeTheme.Heading)
+	s.Link.Color = sptr(activeTheme.Link)
+	s.LinkText.Color = sptr(activeTheme.Link)
+	s.Emph.Color = sptr(activeTheme.Emph)
 
 	// 粗体：终端对 CJK 的 SGR-1 加粗常常没有视觉变化（中文字体普遍没有
 	// 粗体变体），因此同时给颜色（亮白）保证强调可见——这也是 letcode/crush
@@ -221,10 +235,19 @@ func runMDTest() {
 	}
 
 	fmt.Println()
+	okAll := true
 	if hasBackgroundColor(out) {
+		okAll = false
 		fmt.Println("!! 背景色检查：检测到背景色序列（透明度原则被破坏）")
 	} else {
 		fmt.Println("OK 背景色检查：未检测到背景色序列")
+	}
+	// M6：标题 / 链接接入主题色（sprout：#E6E6E6 / #6FB6F0）
+	if strings.Contains(out, "38;2;230;230;230") && strings.Contains(out, "38;2;111;182;240") {
+		fmt.Println("OK 主题化检查：标题与链接使用主题色")
+	} else {
+		okAll = false
+		fmt.Println("!! 主题化检查：标题/链接未使用主题色")
 	}
 
 	// 抽查粗体：含"加粗"的行原始 ANSI（确认亮色样式已注入）
@@ -243,6 +266,10 @@ func runMDTest() {
 	}
 	elapsed := time.Since(start)
 	fmt.Printf("性能采样：%d 次渲染共 %v（平均 %v/次）\n", runs, elapsed, elapsed/runs)
+
+	if !okAll {
+		os.Exit(1)
+	}
 }
 
 // sampleMarkdown 自检样例：覆盖常见构造 + CJK 折行 + 超长代码行。

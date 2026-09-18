@@ -178,6 +178,10 @@ type Feed struct {
 	//（留白/空行为 nil）。鼠标点击命中测试用（View 每帧都调 Render，
 	// 所以点击时的窗口归属总是最新的）。
 	viewOwners []*FeedItem
+
+	// aggDisabled 聚合折叠开关（M6）：工具卡键盘选择态期间置真——
+	// 逐卡导航要能看到每一张卡，聚合行会挡住它们（见 ui_nav.go）。
+	aggDisabled bool
 }
 
 // NewFeed 创建空消息区。
@@ -264,18 +268,120 @@ func (f *Feed) maxScroll() int {
 func (f *Feed) allLines() ([]string, []*FeedItem) {
 	var lines []string
 	var owners []*FeedItem
-	for i, it := range f.items {
-		if i > 0 {
-			lines = append(lines, "") // item 之间空一行
+	first := true
+	// emit 输出一个“块”（单条消息或一个聚合组）：块之间空一行；聚合行
+	// 归首张有正文的卡（点击展开它，见 main.handleClick）。
+	emit := func(ls []string, owner *FeedItem) {
+		if !first {
+			lines = append(lines, "")
 			owners = append(owners, nil)
 		}
-		item := f.itemLines(it)
-		lines = append(lines, item...)
-		for range item {
-			owners = append(owners, it)
+		first = false
+		lines = append(lines, ls...)
+		for range ls {
+			owners = append(owners, owner)
 		}
 	}
+	for i := 0; i < len(f.items); i++ {
+		it := f.items[i]
+		if !f.aggDisabled && aggEligible(it) {
+			j := i
+			for j+1 < len(f.items) && aggEligible(f.items[j+1]) {
+				j++
+			}
+			if j > i {
+				group := f.items[i : j+1]
+				owner := group[0]
+				for _, g := range group {
+					if hasToolBody(g) {
+						owner = g
+						break
+					}
+				}
+				emit([]string{aggLine(group, f.width)}, owner)
+				i = j
+				continue
+			}
+		}
+		emit(f.itemLines(it), it)
+	}
 	return lines, owners
+}
+
+// ---------------------------------------------------------------------------
+// M6：工具卡聚合折叠（连续“完成且折叠”的卡 → 一行 read 2 · checks 1 · expand）
+// ---------------------------------------------------------------------------
+
+// aggEligible 卡是否可进聚合：完成、折叠、非失败、非选中、非子代理。
+// 失败卡要露红、进行中的卡在跟输出、子代理卡信息量大——都不折叠。
+func aggEligible(it *FeedItem) bool {
+	if it.Kind != kTool || it.Selected || it.ToolExpanded {
+		return false
+	}
+	if it.ToolBad || it.ToolState == "failed" || it.ToolState != "completed" {
+		return false
+	}
+	if isAgentTool(it.ToolName) {
+		return false
+	}
+	return true
+}
+
+// toolFamily 聚合计数用的短名（照 letcode 的 read / checks / edit 语义）。
+func toolFamily(it *FeedItem) string {
+	name := it.ToolName
+	switch {
+	case strings.HasPrefix(name, "fs__read"), strings.HasPrefix(name, "fs__list"),
+		strings.HasPrefix(name, "search__"), strings.HasPrefix(name, "git__"):
+		return "read"
+	case name == "edit__apply_patch", strings.HasPrefix(name, "fs__write"),
+		strings.HasPrefix(name, "fs__append"), strings.HasPrefix(name, "fs__mkdir"):
+		return "edit"
+	case strings.HasPrefix(name, "shell__"):
+		cmd := strings.ToLower(it.ToolCmd)
+		if strings.Contains(cmd, "test") || strings.Contains(cmd, "lint") ||
+			strings.Contains(cmd, "check") || strings.Contains(cmd, "vet") {
+			return "checks"
+		}
+		return "run"
+	case strings.HasPrefix(name, "fetch__"), strings.HasPrefix(name, "web__"):
+		return "fetch"
+	}
+	return "tool"
+}
+
+// aggLine 聚合行：⌬ ▸ read 2 · checks 1 · expand（计数按首现顺序）。
+func aggLine(group []*FeedItem, w int) string {
+	type famCount struct {
+		name string
+		n    int
+	}
+	var counts []famCount
+	for _, it := range group {
+		fam := toolFamily(it)
+		hit := false
+		for i := range counts {
+			if counts[i].name == fam {
+				counts[i].n++
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			counts = append(counts, famCount{fam, 1})
+		}
+	}
+	parts := make([]string, 0, len(counts))
+	for _, c := range counts {
+		parts = append(parts, fmt.Sprintf("%s %d", c.name, c.n))
+	}
+	pre := toolOKStyle.Render("\u23E3") + " " + toolOKStyle.Render("\u25B8") + " "
+	tail := dimStyle.Render(" \u00B7 expand")
+	avail := w - 2 - lipgloss.Width(pre) - lipgloss.Width(tail)
+	if avail < 8 {
+		avail = 8
+	}
+	return "  " + pre + textStyle.Render(clipWidth(strings.Join(parts, " \u00B7 "), avail)) + tail
 }
 
 // itemLines 渲染一条消息（带缓存；流式中的 item 不缓存）。
@@ -751,6 +857,9 @@ func toolBodyLines(it *FeedItem, w int) []string {
 				out = append(out, "    "+textStyle.Render(ln))
 			}
 		}
+	} else if it.ToolName == "edit__apply_patch" && hasPatchEdits(it.ToolRaw) {
+		// M6 diff 特例：旧行红系 / 新行绿系 + -/+ 标记；宽时双栏对照
+		out = append(out, patchDiffLines(it.ToolRaw, w)...)
 	} else if it.ToolRaw != "" {
 		for _, ln := range wrapText(it.ToolRaw, textW) {
 			out = append(out, "    "+dimStyle.Render(ln))
@@ -758,7 +867,13 @@ func toolBodyLines(it *FeedItem, w int) []string {
 	}
 
 	// 输出：整段留尾，逐行折行后加 │ 竖条（暗灰，与用户消息的绿竖条区分）。
-	src := strings.Split(strings.TrimRight(it.ToolOut, "\n"), "\n")
+	// edit__apply_patch：输出即“patched N files · N edits”时与结果摘要同文，
+	// 跳过以避重复（diff 本体已在上面渲染）。
+	outText := it.ToolOut
+	if it.ToolName == "edit__apply_patch" && strings.TrimSpace(outText) == strings.TrimSpace(it.ToolEnd) {
+		outText = ""
+	}
+	src := strings.Split(strings.TrimRight(outText, "\n"), "\n")
 	if len(src) == 1 && src[0] == "" {
 		return out
 	}
@@ -1089,6 +1204,80 @@ func runFeedTest() {
 		bad = true
 	} else {
 		fmt.Printf("OK 折行断言：词边界优先 %v ｜ 超长词硬切 %v ｜ 样张 %q\n", okWord, okHard, wrapLines)
+	}
+
+	// 聚合折叠断言（M6）：三张连续完成的 read 卡 → 一行「read 3 · expand」
+	fmt.Println()
+	{
+		af := NewFeed()
+		af.SetSize(76, 20)
+		for i := 0; i < 3; i++ {
+			it := af.Append(kTool, "")
+			it.ToolName = "fs__read"
+			it.ToolCall = fmt.Sprintf("fs__read f%d.txt", i)
+			it.ToolState = "completed"
+			it.ToolCmd = "cat f.txt"
+		}
+		all, owners := af.allLines()
+		okAgg := len(all) == 1 && strings.Contains(stripANSI(all[0]), "read 3") &&
+			owners[0] == af.items[0]
+		// 失败卡打断聚合
+		badIt := af.Append(kTool, "")
+		badIt.ToolName, badIt.ToolState, badIt.ToolBad = "shell__exec", "failed", true
+		all2, _ := af.allLines()
+		okBreak := len(all2) == 3 // 聚合行 + 空行 + 失败卡行
+		// 选择态禁用聚合：4 张卡各 1 行 + 卡间 3 空行 = 7 行
+		af.aggDisabled = true
+		all3, _ := af.allLines()
+		okOff := len(all3) == 7
+		af.aggDisabled = false
+		if !okAgg || !okBreak || !okOff {
+			fmt.Printf("!! 聚合断言：三连折叠 %v ｜ 失败卡打断 %v ｜ 选择态禁用 %v\n", okAgg, okBreak, okOff)
+			bad = true
+		} else {
+			fmt.Println("OK 聚合断言：read 3 → 一行；失败卡打断；选择态禁用（逐卡）")
+		}
+		if len(all) > 0 {
+			fmt.Println("  聚合样张：" + stripANSI(all[0]))
+		}
+	}
+
+	// diff 特例断言（M6）：edit__apply_patch → ← Patch 头 + 红 - / 绿 +（宽屏双栏、窄屏单栏）
+	fmt.Println()
+	{
+		df := NewFeed()
+		df.SetSize(76, 20)
+		dit := df.Append(kTool, "")
+		dit.ToolName = "edit__apply_patch"
+		dit.ToolCall = "edit__apply_patch"
+		dit.ToolState = "completed"
+		dit.ToolRaw = `{"edits":[{"path":"a.txt","find":"old line","replace":"new line","replace_all":false}]}`
+		wide := patchDiffLines(dit.ToolRaw, 76)
+		joined := stripANSI(strings.Join(wide, "\n"))
+		okDiff := strings.Contains(joined, "← Patch a.txt") &&
+			strings.Contains(joined, "- old line") && strings.Contains(joined, "+ new line")
+		rawJ := strings.Join(wide, "\n")
+		okColor := strings.Contains(rawJ, "38;2;201;123;123") && strings.Contains(rawJ, "38;2;121;199;125")
+		okW := true
+		for _, ln := range wide {
+			if lipgloss.Width(ln) > 76 {
+				okW = false
+			}
+		}
+		narrow := stripANSI(strings.Join(patchDiffLines(dit.ToolRaw, 30), "\n"))
+		okNarrow := strings.Contains(narrow, "-old line") && strings.Contains(narrow, "+new line")
+		if !okDiff || !okColor || !okW || !okNarrow {
+			fmt.Printf("!! diff 断言：内容 %v ｜ 红绿 %v ｜ 宽度 %v ｜ 窄屏单栏 %v\n", okDiff, okColor, okW, okNarrow)
+			bad = true
+		} else {
+			fmt.Println("OK diff 断言：← Patch a.txt + 红 - / 绿 + + 宽度合规 + 窄屏单栏")
+		}
+		for i, ln := range wide {
+			if i >= 6 {
+				break
+			}
+			fmt.Printf("  %s  (w=%d)\n", stripANSI(ln), lipgloss.Width(ln))
+		}
 	}
 
 	fmt.Println()

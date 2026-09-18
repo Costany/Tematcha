@@ -96,6 +96,28 @@ func (m model) palMatches() []int {
 	return out
 }
 
+// palShown 弹层当前实际显示的命令下标（渲染与鼠标命中共用同一口径）：
+// 返回 shown 与 more（溢出条数）。shown 最多 cmdPaletteRows-1 条，最后一行
+// 留给「… 还有 N 条」。
+func (m model) palShown() (shown []int, more int) {
+	idx := m.palMatches()
+	if len(idx) > cmdPaletteRows {
+		more = len(idx) - (cmdPaletteRows - 1)
+		idx = idx[:cmdPaletteRows-1]
+	}
+	return idx, more
+}
+
+// palRowAt 把弹层显示行号（0 起）映射到命令下标（鼠标点选用；越界/
+// 溢出提示行返回 false）。行序与 renderCmdPalette 一致。
+func (m model) palRowAt(row int) (int, bool) {
+	shown, _ := m.palShown()
+	if row < 0 || row >= len(shown) {
+		return 0, false
+	}
+	return shown[row], true
+}
+
 // palSelAt 把选中下标收拢进过滤结果的合法范围（选中 = 过滤结果里的第几条）。
 func (m model) palSelAt(n int) int {
 	s := m.palSel
@@ -151,11 +173,7 @@ func (m model) renderCmdPalette() []string {
 	}
 	sel := m.palSelAt(len(idx))
 
-	shown, more := idx, 0
-	if len(shown) > cmdPaletteRows {
-		more = len(shown) - (cmdPaletteRows - 1)
-		shown = shown[:cmdPaletteRows-1]
-	}
+	shown, more := m.palShown()
 
 	budget := m.blockWidth()
 	withHint := true
@@ -514,6 +532,19 @@ func runCmdTest() {
 	m5.input.SetText("/per")
 	m5.palKey(press(tea.KeyEscape, ""))
 	check("esc：只关弹层，输入文字保留", m5.palHidden && !m5.palOpen() && m5.input.Text() == "/per")
+
+	// ⑤b M6：鼠标点选行号映射（palRowAt：行→命令下标；溢出行/越界 = false）
+	{
+		pm := base(100)
+		pm.input.SetText("/") // 9 条命令 → shown 7 行 + 1 行「… 还有 N 条」
+		idx := pm.palMatches()
+		ci0, ok0 := pm.palRowAt(0)
+		ci6, ok6 := pm.palRowAt(6)
+		_, ok7 := pm.palRowAt(7)
+		_, okNeg := pm.palRowAt(-1)
+		check("点选映射：行 0..6 → 命令；行 7（溢出提示行）/ -1 → 无",
+			ok0 && ci0 == idx[0] && ok6 && ci6 == idx[6] && !ok7 && !okNeg)
+	}
 
 	// ⑥ 键路由：弹层开着时 ↑ 归弹层（不滚消息区）、tab 不进工具卡选择态、esc 不取消回合
 	{

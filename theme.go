@@ -40,6 +40,11 @@ type Theme struct {
 	ThoughtPre string // 思考前缀
 	ThoughtTtl string // 思考标题
 
+	// markdown 元素（M6 全量主题化：标题 / 链接 / 斜体）
+	Heading string
+	Link    string
+	Emph    string
+
 	// 线框与容器
 	Rule        string // 细线（输入区框线、进度条空槽）
 	Placeholder string // 占位提示
@@ -70,6 +75,7 @@ var sproutTheme = Theme{
 	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C",
 	Accent: "#00E7A4", OK: "#79C77D", Err: "#C97B7B", ErrSoft: "#D98A8A",
 	Warn: "#FFD166", Reply: "#6FB6F0", PromptOff: "#4A4A4A", PromptOn: "#3CCF7E",
+	Heading: "#E6E6E6", Link: "#6FB6F0", Emph: "#B8B8B8",
 
 	GradA: "#C4F07E", GradB: "#79C77D", GradC: "#4C875F",
 }
@@ -86,6 +92,7 @@ var monoTheme = Theme{
 	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C",
 	Accent: "#E8E8E8", OK: "#C8C8C8", Err: "#A8A8A8", ErrSoft: "#D8D8D8",
 	Warn: "#DDDDDD", Reply: "#C4C4C4", PromptOff: "#4A4A4A", PromptOn: "#D0D0D0",
+	Heading: "#F2F2F2", Link: "#C4C4C4", Emph: "#B0B0B0",
 
 	GradA: "#F0F0F0", GradB: "#C8C8C8", GradC: "#8C8C8C",
 }
@@ -270,6 +277,12 @@ func themeSample() string {
 	for _, ln := range m.renderPanel(12) {
 		b.WriteString(ln + "\n")
 	}
+	// markdown（M6：标题/链接/斜体已接入主题。只放已主题化的元素——代码块/
+	// 表格的 chroma 语法制导色仍随 glamour dark，见 §11 说明）
+	if out, ok := renderMarkdown("# 标题\n\n一段 **粗体** *斜体* `代码` [链接](https://example.com)", 60); ok {
+		b.WriteString(out + "\n")
+	}
+
 	// 滚动条（缩到 3 行制造溢出，让拇指/轨道都出场）
 	sc := NewFeed()
 	sc.SetSize(40, 3)
@@ -359,6 +372,14 @@ func runThemeTest() {
 		strings.Contains(sproutSample, "38;2;255;209;102") // 提醒（琥珀）
 	check("mono：界面样张全灰（无彩色 SGR、无背景色）；sprout：强调/成功/失败/提醒四色都在",
 		monoClean && okColors)
+
+	// ④b M6：markdown 标题/链接颜色来自主题（sprout 实测 #E6E6E6 / #6FB6F0）
+	mdOut := ""
+	if out, ok := renderMarkdown("# 标题\n\n[链接](https://example.com)", 60); ok {
+		mdOut = out
+	}
+	okMD := strings.Contains(mdOut, "38;2;230;230;230") && strings.Contains(mdOut, "38;2;111;182;240")
+	check("markdown：标题/链接使用主题色（sprout 实测）", okMD)
 
 	// ⑤ 渐变：10 格、端点 = A / C、50% 填充格 ≥3 种颜色（确实在渐变）
 	grad := contextBarGrad(10)

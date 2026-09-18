@@ -576,6 +576,9 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.cardNavToggle()
 			return m, nil
+		case "ctrl+y":
+			// M6：复制选中的卡到系统剪贴板
+			return m, m.cardNavCopy()
 		case "pgup", "pgdown":
 			// 滚动键放行（保持选择态，位置不丢）
 		default:
@@ -614,6 +617,12 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// M6：ctrl+y 复制最后一条助手回复（选择态里的 ctrl+y 复制选中卡，
+	// 已在上面的 cardNav 分支消化）。
+	if k.String() == "ctrl+y" {
+		return m, m.copyLastReply()
+	}
+
 	before := m.input.Text()
 	handled, submit, cancel := m.input.HandleKey(k)
 	if !handled {
@@ -647,6 +656,9 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 //
 // 观感照 crush。
 func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if msg.Button == tea.MouseRight {
+		return m.handleRightClick(msg)
+	}
 	if msg.Button != tea.MouseLeft {
 		return m, nil
 	}
@@ -656,6 +668,21 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	// 消息区右缘还挂着滚动条列（M4a）——面板区起点要把它算进去。
 	if m.panelVisible() && msg.X >= m.feed.width+scrollBarW+panelSepW {
 		return m, nil
+	}
+	// M6：命令弹层鼠标点选（点某一行 = 选中并执行；带参数命令先补全）。
+	if m.palOpen() {
+		palTop := 1 + len(m.renderTodosPinned(m.feed.width)) + m.feed.normH() + 1 + len(m.renderPermPanel(m.width))
+		if msg.Y >= palTop {
+			if ci, ok := m.palRowAt(msg.Y - palTop); ok {
+				c := m.cmds[ci]
+				m.completeCmd(c)
+				if c.Hint == "" {
+					return m.submit()
+				}
+				m.syncLayout()
+				return m, nil
+			}
+		}
 	}
 	// View 布局：第 0 行是顶部留白，接着是钉面板（M5b），之后才是消息区窗口
 	target := m.feed.ItemAt(msg.Y - 1 - len(m.renderTodosPinned(m.feed.width)))
@@ -686,6 +713,25 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		m.focused.touch()
 	}
 	return m, nil
+}
+
+// handleRightClick 鼠标右键点击消息区：复制该条消息到系统剪贴板（M6）。
+// 命中口径与左键一致（右栏区域忽略；行号先扣顶部留白与钉面板）。
+func (m model) handleRightClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if m.panelVisible() && msg.X >= m.feed.width+scrollBarW+panelSepW {
+		return m, nil
+	}
+	target := m.feed.ItemAt(msg.Y - 1 - len(m.renderTodosPinned(m.feed.width)))
+	if target == nil {
+		return m, nil
+	}
+	text := copyTextFor(target)
+	if text == "" {
+		return m, nil
+	}
+	m.feed.ScrollToBottom()
+	m.feed.Append(kSys, "已复制（"+fmt.Sprintf("%d", len([]rune(text)))+" 字）")
+	return m, clipboardCmd(text)
 }
 
 // submit 提交当前输入：空闲 → 直接开回合；回合进行中 → 排队（M3c）。
@@ -1553,6 +1599,7 @@ func main() {
 	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
 	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
 	trace := flag.Bool("trace", false, "把 ACP 原始流量落盘到 acp-trace.log（排障用）")
+	copyTest := flag.Bool("copytest", false, "复制消息自检（文本生成/命令构造/回执）")
 	flag.Parse()
 
 	traceTo := ""
@@ -1648,6 +1695,10 @@ func main() {
 
 	if *agentTest {
 		runAgentTest()
+		return
+	}
+	if *copyTest {
+		runCopyTest()
 		return
 	}
 
