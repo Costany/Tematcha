@@ -226,7 +226,13 @@ func (m model) renderStatusBar() string {
 
 	// 左段预算：总宽 - 左右边距 - 右段 - 至少 1 格间隙 - 前缀
 	budget := m.width - 4 - lipgloss.Width(right) - 1 - lipgloss.Width(prefix)
-	left := prefix + m.statusLeft(budget)
+	// M11：忙时引擎状态段为空（动态信息在工作区）——只有前缀没有内容时
+	// 去掉尾部的 " · "，避免"letcode · "这种悬空的分隔符。
+	state := m.statusLeft(budget)
+	left := prefix + state
+	if state == "" {
+		left = modelStyle.Render("letcode")
+	}
 
 	pad := m.width - 4 - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 1 {
@@ -252,7 +258,12 @@ func (m model) statusLeft(budget int) string {
 		return userBarStyle.Render(fmt.Sprintf("选择工具卡 %d/%d", i, n))
 	}
 
-	segs := []string{m.engineStateText()}
+	// M11：引擎状态段可能为空（忙时动态信息在工作区）——空段不参与拼装，
+	// 免得留下前导分隔符。
+	segs := []string{}
+	if s := m.engineStateText(); s != "" {
+		segs = append(segs, s)
+	}
 	// M3c 输入队列：排队中的消息数（回合结束会自动接着发）。
 	// 放在状态词后面——窄屏降级从尾部丢段，它会比模式/上下文/模型留得久。
 	if n := len(m.queue); n > 0 {
@@ -267,47 +278,33 @@ func (m model) statusLeft(budget int) string {
 	if s := m.renderModelSeg(); s != "" {
 		segs = append(segs, s)
 	}
-	// 降级：从尾部（模型）开始丢，直到装得下（至少保留引擎状态）
+	if len(segs) == 0 {
+		return ""
+	}
+	// 降级：从尾部（模型）开始丢，直到装得下（至少保留最左一段）
 	for len(segs) > 1 && lipgloss.Width(strings.Join(segs, " \u00B7 ")) > budget {
 		segs = segs[:len(segs)-1]
 	}
 	return strings.Join(segs, dimStyle.Render(" \u00B7 "))
 }
 
-// engineStateText 引擎状态词（跟随心跳换帧）。
+// engineStateText 引擎状态（§3 左段）：M11 起动态内容（工作行 / 压缩进度 /
+// 收尾行）全部搬去输入栏上方的工作区（workStripLines），状态栏只留轻量静态
+// 状态词——忙时为空（动态信息在工作区，避免两处重复）。
 func (m model) engineStateText() string {
-	// 一致性兜底：非忙碌时不应停留在"思考中/回复中"（防迟到事件污染状态）
-	if !m.busy {
-		switch m.status {
-		case stThinking, stReplying:
-			return dimStyle.Render("回合结束")
-		}
-	}
-	// M5d：压缩回合进行中——状态词换成"正在整理上下文"+跳跃小条
-	if m.compactReq && m.busy {
-		return m.compactStateText()
+	if m.busy {
+		return ""
 	}
 	switch m.status {
 	case stIdle:
 		return dimStyle.Render("空闲")
-	case stThinking:
-		return thinkStyle.Render("思考中" + dots(m.blinkN))
-	case stReplying:
-		return replyStyle.Render("回复中" + dots(m.blinkN))
-	case stCancelling:
-		return warnStyle.Render("取消中…")
 	case stLoading:
 		return replyStyle.Render("载入会话…")
-	case stDone:
-		return dimStyle.Render("回合结束")
-	case stCancelled:
-		return warnStyle.Render("已取消")
-	case stError:
-		return errStyle.Render("出错")
 	case stEngineGone:
 		return errStyle.Render("引擎已退出")
 	}
-	return dimStyle.Render(m.status)
+	// 取消 / 出错 / 回合结束的收尾语都在工作区，这里不重复。
+	return ""
 }
 
 // renderModeBadge 模式徽章：safe 柔绿 / default 中性 / auto 琥珀 / yolo 柔红。
@@ -371,19 +368,6 @@ func (m model) renderModelSeg() string {
 	return s
 }
 
-// dots 省略号动画帧（由心跳序号驱动，节奏 500ms 一换）。
-func dots(n int) string {
-	switch n % 4 {
-	case 0:
-		return "."
-	case 1:
-		return ".."
-	case 2:
-		return "..."
-	}
-	return ""
-}
-
 // ---------------------------------------------------------------------------
 // -statustest：状态栏样张自检（多状态 / 多宽度 / 阈值色 / 背景色）
 // ---------------------------------------------------------------------------
@@ -398,8 +382,8 @@ func runStatusTest() {
 		m    model
 	}{
 		{"空闲 · default · 27%（绿）", 110, model{status: stIdle, modeID: "default", usageUsed: 87300, usageSize: 320000, modelLabel: "Step 3.7 Flash"}},
-		{"思考中 · auto · 91%（红）", 110, model{busy: true, status: stThinking, blinkN: 2, modeID: "auto", usageUsed: 291200, usageSize: 320000, modelLabel: "Step 3.7 Flash"}},
-		{"回复中 · yolo · 66%（黄）", 110, model{busy: true, status: stReplying, blinkN: 1, modeID: "yolo", usageUsed: 211200, usageSize: 320000, modelLabel: "Step 3.7 Flash", reasoning: "high"}},
+		{"忙 · auto · 91%（红）（动态信息在工作区）", 110, model{busy: true, status: stThinking, blinkN: 2, modeID: "auto", usageUsed: 291200, usageSize: 320000, modelLabel: "Step 3.7 Flash"}},
+		{"忙 · yolo · 66%（黄）", 110, model{busy: true, status: stReplying, blinkN: 1, modeID: "yolo", usageUsed: 211200, usageSize: 320000, modelLabel: "Step 3.7 Flash", reasoning: "high"}},
 		{"空闲 · safe · 无用量", 110, model{status: stIdle, modeID: "safe", modelLabel: "Step 3.7 Flash"}},
 		{"窄屏 80（丢模型）", 80, model{status: stIdle, modeID: "default", usageUsed: 87300, usageSize: 320000, modelLabel: "Step 3.7 Flash"}},
 		{"窄屏 64（再丢用量）", 64, model{status: stIdle, modeID: "default", usageUsed: 87300, usageSize: 320000, modelLabel: "Step 3.7 Flash"}},

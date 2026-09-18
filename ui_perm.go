@@ -208,7 +208,9 @@ func (m *model) syncLayout() {
 	// M5b：钉面板（# Todos）钉在消息区顶部、不参与滚动——占几行就扣几行。
 	// 先定宽度再算它（渲染器要宽度参数；行数只由待办条数决定，顺序别反）。
 	todosH := len(m.renderTodosPinned(w))
-	h := m.height - 6 - panelH - elicitH - cmdH - sessH - todosH
+	// M11：工作区（输入栏上方的一行：工作行 / 压缩进度条 / 收尾行）也占高度。
+	workH := len(m.workStripLines())
+	h := m.height - 6 - workH - panelH - elicitH - cmdH - sessH - todosH
 	if h < 3 {
 		h = 3
 	}

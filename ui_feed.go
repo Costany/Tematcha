@@ -129,7 +129,6 @@ type FeedItem struct {
 	// 用户消息专用：Focused=被鼠标点击选中——左侧竖条由细线 │ 换成
 	// 半块 ▌（观感照 crush 的 focused/blurred 两态）。
 	Focused bool
-
 	// 工具卡专用（M2b v2）：Selected=键盘选择态当前选中的卡——头行两格
 	// 缩进换成强调绿 ▌（宽度不变、不铺底色，与用户消息同款视觉语言）。
 	Selected bool
@@ -387,6 +386,7 @@ func aggLine(group []*FeedItem, w int) string {
 
 // itemLines 渲染一条消息（带缓存；流式中的 item 不缓存）。
 func (f *Feed) itemLines(it *FeedItem) []string {
+	// 流式中的条目（带光标）不缓存：文字逐帧增长，缓存没有意义。
 	if !it.Cursor && it.cache != nil && it.cacheW == f.width && it.cacheVer == it.ver && it.cacheEpoch == themeEpoch {
 		return it.cache
 	}

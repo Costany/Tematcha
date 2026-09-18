@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -105,8 +106,10 @@ func runQueueTest() {
 
 	// ③ 状态栏「排队 N」（窄预算也留得住：降级从尾部丢模式/上下文/模型）
 	bar := stripANSI(m.renderStatusBar())
-	narrow := stripANSI(m.statusLeft(16))
-	check("状态栏：「排队 2」常显；预算收紧到 16 格时仍在（先丢的是尾部段）",
+	// 预算须装得下「工作行（§11.6：乱码+静点+状态词）+ 排队 N」两段（约 31 格）——
+	// 降级从尾部丢段，先丢的是模式/上下文/模型，排队段比它们留得久。
+	narrow := stripANSI(m.statusLeft(40))
+	check("状态栏：「排队 2」常显；预算收紧到 40 格时仍在（先丢的是尾部段）",
 		strings.Contains(bar, "排队 2") && strings.Contains(narrow, "排队 2"))
 
 	// ④ 排队条目样张：暗色竖条 + 尾行「· 排队中」
@@ -331,14 +334,27 @@ type model struct {
 	// 消息在消息区显示两次（用户截图实况）。会话重放（loading）时不消费。
 	localEcho string
 
-	// M5d 压缩动画（§8）：compactReq = 本回合是 /compact（状态栏显示"正在整理
-	// 上下文"+跳跃小条）；compactSawDrop = 这回合里观察到用量下降；
+	// M5d 压缩进度（§8 · M11 改造）：compactReq = 本回合是 /compact（进度条显示
+	// 在输入栏上方的工作区）；compactSawDrop = 这回合里观察到用量下降；
+	// compactDone = 压缩环节完成（进度跳 100%）；compactProg = 进度条显示值
+	// （0..100，随时间渐近推进）；compactReceipt = 完成收据（回合结束转收尾行）；
 	// barPct/barTo/barAnim = 上下文条的缓动显示值（心跳驱动）。
 	compactReq     bool
 	compactSawDrop bool
+	compactDone    bool
+	compactProg    int
+	compactReceipt string
 	barPct         int
 	barTo          int
 	barAnim        bool
+
+	// M10/M11 灵动工作行与收尾行（§11.6）：turnChars = 本回合引擎吐回的字符数
+	// （≈↓token）；turnSeq = 回合序号（收尾语轮换）；closeLine/closeKind = 上一条
+	// 收尾行（工作区闲时显示；kind 决定颜色档，见 ui_work.go）。
+	turnChars int
+	turnSeq   int
+	closeLine string
+	closeKind int
 }
 
 func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasoning string) model {
@@ -378,11 +394,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case blinkMsg:
 		m.blinkOn = !m.blinkOn
 		m.blinkN++
-		m.stepBarAnim() // M5d：压缩后的上下文条缓动（心跳驱动）
+		m.stepBarAnim()     // M5d：压缩后的上下文条缓动（心跳驱动）
+		m.stepCompactProg() // M11：压缩进度条推进（按已用时长重算）
 		if m.active != nil {
 			m.active.CursorOn = m.blinkOn
 		}
-		return m, blink() // 续杯：心跳链永远只有这一根
+		return m, blinkAfter(m.blinkInterval()) // 续杯：心跳链永远只有这一根
 
 	case acpEventMsg:
 		m.handleEvent(msg.ev)
@@ -833,9 +850,15 @@ func (m model) beginTurn(text string) (model, tea.Cmd) {
 	m.busy = true
 	m.status = stThinking
 	m.turnStart = time.Now()
-	m.compactReq = isCompactCmd(text) // M5d：压缩回合的状态栏瞬态
+	m.turnChars = 0                   // M10：本回合吐回字符数清零（≈↓token 估算的基数）
+	m.compactReq = isCompactCmd(text) // M5d：压缩回合（M11 起在输入栏上方的工作区显示进度条）
 	if m.compactReq {
+		// M11：压缩可视化 = 工作区进度条 + 百分比，由心跳按已用时长推进；
+		// 观察到用量下降时跳 100%（noteUsageDrop），回合结束收成收据收尾行。
 		m.compactSawDrop = false
+		m.compactDone = false
+		m.compactProg = 0
+		m.compactReceipt = ""
 	}
 	m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
 	m.tools = make(map[string]*FeedItem)
@@ -896,13 +919,31 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
 
-	// M5d 压缩收尾：手动 /compact 且整回合没观察到用量下降 → 给一句说明；
-	// 取消的回合不算完成（引擎没跑完）。登记清零避免影响下一回合。
+	// M10/M11 收尾行（§11.6）：工作区闲时显示"上一回合怎么了"——常规收尾语按
+	// 时长分档 + 轮换序号递增；压缩回合随后覆盖成收据/未见下降/取消/失败。
+	m.closeLine = closingLine(m.status, dur, m.turnSeq)
+	m.closeKind = closePlain
+	switch m.status {
+	case stCancelled:
+		m.closeKind = closeWarn
+	case stError:
+		m.closeKind = closeErr
+	}
+	m.turnSeq++
+
+	// M5d/M11 压缩收尾：工作区收成一行结论（收据 / 未见下降 / 取消 / 失败）。
 	if m.compactReq {
-		if msg.err == nil && msg.reason != "cancelled" && !m.compactSawDrop {
-			m.feed.Append(kSys, "压缩请求已完成（未观察到用量下降）")
+		switch {
+		case msg.err != nil:
+			m.closeLine, m.closeKind = "压缩失败", closeErr
+		case msg.reason == "cancelled":
+			m.closeLine, m.closeKind = "压缩已取消 · "+formatElapsed(dur), closeWarn
+		case m.compactSawDrop:
+			m.closeLine, m.closeKind = "\u2713 "+m.compactReceipt, closeOK
+		default:
+			m.closeLine, m.closeKind = "压缩请求已完成（未观察到用量下降）", closeWarn
 		}
-		m.compactReq, m.compactSawDrop = false, false
+		m.compactReq, m.compactSawDrop, m.compactDone = false, false, false
 	}
 
 	// M3c：队列里还有排队消息 → 立刻出队转正，接着开下一回合（用户不用再敲一次）
@@ -989,6 +1030,7 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 	case "agent_message_chunk":
 		m.endThoughtCycle() // 回答开始 = 上一段思考周期结束（定格其耗时）
 		if text := chunkText(upd); text != "" {
+			m.turnChars += utf8.RuneCountInString(text) // M10：工作行的 ≈↓token
 			if it := m.lastAssistant; !m.busy && it != nil {
 				// 回合已结束但事件才排到（应答通道先到）：并回上一段正文，
 				// 保证"完整正文在分隔行上方"（见 lastAssistant 字段注释）。
@@ -1007,6 +1049,7 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 	case "agent_thought_chunk":
 		m.endAssistantSegment() // 推理开始 = 上一段正文结束
 		if text := chunkText(upd); text != "" {
+			m.turnChars += utf8.RuneCountInString(text) // M10：思考也算产出（≈↓token）
 			if it := m.lastThought; !m.busy && it != nil {
 				// 同上：迟到的思考 chunk 并回上一段思考块
 				m.feed.AppendStr(it, text)
@@ -1529,6 +1572,12 @@ func (m model) View() tea.View {
 		sb.WriteString(ln + "\n")
 	}
 
+	// ②.7 工作区（M11 · §11.6）：输入栏正上方的一行——忙时工作行 / 压缩进度条，
+	// 闲时上一回合的收尾行；行数已在 syncLayout 里从消息区扣出。
+	for _, ln := range m.workStripLines() {
+		sb.WriteString(ln + "\n")
+	}
+
 	// ③ 输入区（上下细线 + 输入行）
 	sb.WriteString(m.renderInputBlock() + "\n")
 
@@ -1548,7 +1597,21 @@ func (m model) View() tea.View {
 
 // blink 光标闪烁心跳：每 500ms 翻转一次（单链，只在 Update 里续杯）。
 func blink() tea.Cmd {
-	return tea.Tick(blinkLag, func(time.Time) tea.Msg { return blinkMsg{} })
+	return blinkAfter(blinkLag)
+}
+
+// blinkAfter 以指定间隔续下一次心跳（M9：压缩动画期间走 120ms 快档）。
+func blinkAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg { return blinkMsg{} })
+}
+
+// blinkInterval 当前心跳间隔：忙时（工作行乱码在闪 §11.6 / 压缩进度条在跑）
+// 用 120ms 快档，闲时回到 500ms（光标闪烁与省略号节奏照旧）。
+func (m model) blinkInterval() time.Duration {
+	if m.busy {
+		return workFastLag
+	}
+	return blinkLag
 }
 
 // waitEvent 阻塞等一条引擎事件；每次消费后由 Update 再 arm 下一条。
@@ -1602,7 +1665,8 @@ func main() {
 	todosTest := flag.Bool("todostest", false, "钉面板自检（渲染/超长截断/开关/布局/View 集成）")
 	themeTest := flag.Bool("themetest", false, "主题系统自检（注册表/命令/渐变/单色探测/缓存作废）")
 	echoTest := flag.Bool("echotest", false, "回显去重自检（本地回显 vs 引擎回发 user_message_chunk）")
-	compactTest := flag.Bool("compacttest", false, "压缩动画自检（/compact 识别/瞬态/下降缓动/回执/指纹）")
+	compactTest := flag.Bool("compacttest", false, "压缩进度自检（/compact 识别/工作区进度条/填充语义/完成跳 100%/三态收尾）")
+	workTest := flag.Bool("worktest", false, "灵动工作行自检（乱码块/拼装/收尾语/工作区集成）")
 	agentTest := flag.Bool("agenttest", false, "子代理增强自检（识别/信封/chips/工具卡/来源徽章）")
 	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
 	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
@@ -1617,7 +1681,7 @@ func main() {
 
 	if *widthCk {
 		fmt.Println("符号宽度检查（全部应为 1 才安全）：")
-		for _, s := range []string{"\u276F", "\u23E3", "\u25C7", "\u25B8", "\u25BE", "\u00B7", "\u2503", "\u2502", "\u258C", "\u2588", "\u2591", "\u25CB", "\u25D0", "\u2713", "\u00BB", "\u203A", "~", "\u2500", "\u2026"} {
+		for _, s := range []string{"\u276F", "\u23E3", "\u25C7", "\u25B8", "\u25BE", "\u00B7", "\u2503", "\u2502", "\u258C", "\u2588", "\u2591", "\u25CB", "\u25D0", "\u2713", "\u00BB", "\u203A", "~", "\u2500", "\u2026", "\u2191", "\u2193"} {
 			fmt.Printf("  %q  width=%d\n", s, lipgloss.Width(s))
 		}
 		return
@@ -1695,9 +1759,13 @@ func main() {
 		runEchoTest()
 		return
 	}
-
 	if *compactTest {
 		runCompactTest()
+		return
+	}
+
+	if *workTest {
+		runWorkTest()
 		return
 	}
 
