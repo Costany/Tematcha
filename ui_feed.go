@@ -185,6 +185,15 @@ func (f *Feed) SetSize(w, h int) {
 // Len 返回消息条数。
 func (f *Feed) Len() int { return len(f.items) }
 
+// Last 返回最后一条消息（空 feed 返回 nil）。
+// 用于"紧挨着的重复提示不落两遍"这类去重判断（见 main.submit 的护栏分支）。
+func (f *Feed) Last() *FeedItem {
+	if len(f.items) == 0 {
+		return nil
+	}
+	return f.items[len(f.items)-1]
+}
+
 // Append 追加一条消息。
 func (f *Feed) Append(kind int, text string) *FeedItem {
 	it := &FeedItem{Kind: kind, Text: text}
@@ -1003,6 +1012,28 @@ func runFeedTest() {
 		fmt.Printf("OK 宽度断言：%d 行全部 ≤ %d 格\n", len(raw), w)
 	}
 
+	// 折行规则断言（M4e 打磨）：折行点优先落在空白（词边界）上——英文、路径、
+	// 命令名不被拦腰截断；找不到空白时（超长 URL）才退化成硬切。
+	fmt.Println()
+	wrapLines := wrapText("提示: 当前模型不接受该推理档位——可先 /model 换模型，或用 /reasoning 查看可选值", 30)
+	okWord, okWrapW := true, true
+	for _, ln := range wrapLines {
+		if lipgloss.Width(ln) > 30 {
+			okWrapW = false
+		}
+	}
+	if !strings.Contains(strings.Join(wrapLines, "\n"), "/reasoning") {
+		okWord = false
+	}
+	hard := wrapText("https://example.com/a/very/long/path/without/any/space/at/all", 20)
+	okHard := len(hard) >= 2 && lipgloss.Width(hard[0]) <= 20
+	if !okWord || !okWrapW || !okHard {
+		fmt.Printf("!! 折行断言：词边界 %v ｜ 行宽≤30 %v ｜ 超长词硬切 %v\n", okWord, okWrapW, okHard)
+		bad = true
+	} else {
+		fmt.Printf("OK 折行断言：词边界优先 %v ｜ 超长词硬切 %v ｜ 样张 %q\n", okWord, okHard, wrapLines)
+	}
+
 	fmt.Println()
 	if bad {
 		fmt.Println("feedtest: 有失败项")
@@ -1204,28 +1235,68 @@ func runScrollTest() {
 
 // wrapText 按显示宽度折行（CJK 安全：每个字符按 lipgloss.Width 计宽；
 // 显式换行符强制折行）。
+//
+// 折行点优先落在空白（词边界）上：英文、路径、命令名不会被拦腰截断
+// （否则会出现 "…或用 /reasonin" + "g 查看可选值" 这种）；找不到空白时
+// 退化为硬折行——超长 URL / 长代码行照样按宽度切开。
 func wrapText(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
 	var lines []string
 	var cur []rune
 	curW := 0
+	flush := func() {
+		lines = append(lines, string(cur))
+		cur, curW = nil, 0
+	}
 	for _, r := range s {
 		if r == '\n' {
-			lines = append(lines, string(cur))
-			cur, curW = nil, 0
+			flush()
 			continue
 		}
 		rw := lipgloss.Width(string(r))
 		if curW+rw > width && len(cur) > 0 {
-			lines = append(lines, string(cur))
-			cur, curW = nil, 0
+			// 回看最后一个空白：以它为折行点（空白本身丢掉），尾巴搬到
+			// 下一行接着排；没有空白（或折出来是空行）才硬切。
+			i := lastBlank(cur)
+			head := ""
+			if i > 0 {
+				head = strings.TrimRight(string(cur[:i]), " \t")
+			}
+			if head == "" {
+				flush()
+				// 折行点就是这个空白本身（行内没有别的空白）：把它丢掉，
+				// 别让它飘到下一行行首（"　/model …" 那种）。
+				if r == ' ' || r == '\t' {
+					continue
+				}
+			} else {
+				lines = append(lines, head)
+				tail := strings.TrimLeft(string(cur[i:]), " \t")
+				cur, curW = []rune(tail), lipgloss.Width(tail)
+				if curW+rw > width { // 尾巴自己就又满了：它独占一行
+					flush()
+				}
+			}
 		}
 		cur = append(cur, r)
 		curW += rw
 	}
 	if len(cur) > 0 {
-		lines = append(lines, string(cur))
+		flush()
 	}
 	return lines
+}
+
+// lastBlank 返回行内最后一个空白（空格 / 制表符）的下标；没有则 -1。
+func lastBlank(rs []rune) int {
+	for i := len(rs) - 1; i >= 0; i-- {
+		if rs[i] == ' ' || rs[i] == '\t' {
+			return i
+		}
+	}
+	return -1
 }
 
 // cellAt 取一行里第 col 个"显示格"上的字符（CJK 按 2 格计；已剥 ANSI）。

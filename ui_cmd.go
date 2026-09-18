@@ -623,7 +623,8 @@ func runCmdTest() {
 			okBare && okBadVal && okLocal && !okGoodVal && !okResumeID && !okNoArg && !okUnknown && !okChat)
 		fmt.Printf("  护栏样张（拦下的话长这样）：%s\n", msg)
 
-		// submit 走护栏：不发引擎、不清输入框、消息区落一条 kWarn 琥珀提示
+		// submit 走护栏：不发引擎、不清输入框、消息区落一条 kWarn 琥珀提示；
+		// 再按一次回车不重复落行（同款提示只留一条）
 		sm := model{width: 100, feed: NewFeed(), status: stIdle, cmds: engineCmds()}
 		sm.input.SetText("/reasoning")
 		nextS, cmd := sm.submit()
@@ -632,6 +633,9 @@ func runCmdTest() {
 			strings.Contains(sm.feed.items[0].Text, "还缺参数")
 		check("submit('/reasoning')：不发引擎 / 输入保留 / 消息区落一条琥珀提示",
 			len(sm.sent) == 0 && okFeed && sm.input.Text() == "/reasoning" && cmd == nil && !sm.busy)
+		nextS, _ = sm.submit()
+		sm = nextS.(model)
+		check("护栏去重：连按回车只留一条同款提示（feed 仍是 1 条）", sm.feed.Len() == 1)
 	}
 
 	if failed {

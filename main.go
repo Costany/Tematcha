@@ -506,9 +506,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 
 	// M4e：命令护栏 —— 引擎必拒的形态（缺参数 / 参数越界 / 本地专有命令）
 	// 在本地用一句琥珀提示说清楚：不发引擎、不动输入框（用户接着补参数）。
+	// 连按回车不必刷屏：紧挨着的上一条是同款提示就只留一条。
 	if guard, blocked := m.cmdGuard(text); blocked {
-		m.feed.ScrollToBottom()
-		m.feed.Append(kWarn, guard)
+		if last := m.feed.Last(); last == nil || last.Kind != kWarn || last.Text != guard {
+			m.feed.ScrollToBottom()
+			m.feed.Append(kWarn, guard)
+		}
 		return m, nil
 	}
 
