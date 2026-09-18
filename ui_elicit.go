@@ -689,6 +689,35 @@ func runElicitTest() {
 	okNext := mq.elicit == e2q && len(mq.elicitQueue) == 0 && e1.Placeholder.Kind == kReceipt
 	check("队列：第二条排队 / 答完自动上桌 / 占位换绿条回执", okQueue && okNext)
 
+	// ⑧ View() 集成：面板行数从消息区扣出，整屏行数不变、面板真的上屏。
+	// 真机教训（2026-09-18）：syncLayout 扣了高度但 View 漏拼装 = 面板隐形 +
+	// esc 被吃成 decline（引擎收到"用户拒绝回答"）。
+	{
+		vm := model{
+			width: 120, height: 30, feed: NewFeed(), status: stIdle, panelOn: false,
+			sessionID: "1234abcd-0000-0000-0000-000000000000",
+			sessTitle: "追问集成样张", modelLabel: "Step 3.7 Flash", modeID: "default",
+		}
+		vm.elicit = parseElicitRequest(float64(9), elicitSampleParams())
+		vm.syncLayout()
+		content := vm.View().Content
+		viewLines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+		okRows := len(viewLines) == vm.height
+		okShow := strings.Contains(stripANSI(content), "追问 2 题") &&
+			strings.Contains(stripANSI(content), "Rust")
+		okVW := true
+		for _, ln := range viewLines {
+			if lipgloss.Width(ln) > vm.width {
+				okVW = false
+				break
+			}
+		}
+		if hasBackgroundColor(content) {
+			okVW = false
+		}
+		check("View() 集成：行数不变 / 面板可见 / 宽度合规 / 背景干净", okRows && okShow && okVW)
+	}
+
 	if failed {
 		fmt.Println("elicittest: 有失败项")
 		os.Exit(1)

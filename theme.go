@@ -2,7 +2,7 @@
 //
 // 设计要点：
 //   - 全部前景色集中到 Theme 结构（§0.5：只前景色、禁止大块底色）；
-//   - 内置主题：sprout（默认 · 柔绿渐变）/ mono（灰度 · 无彩色）；
+//   - 内置主题：sprout（默认 · 翠绿）/ mono（灰度 · 无彩色）；
 //   - applyTheme 重建所有样式变量（ui_feed.go 的 var 块）并作废 glamour
 //     渲染器缓存（mdRenderers 里烤着旧颜色，不清会拿旧色渲染）；
 //   - 柔绿渐变（§11.5）：上下文条填充格按 A → B → C 取值
@@ -64,20 +64,21 @@ type Theme struct {
 	GradA, GradB, GradC string
 }
 
-// sproutTheme 内置默认主题：柔绿渐变（§11.5 定调）。
-// 色值取自已实装验收的现状（M1.7 起的强调绿 + M1.6 起的工具状态色），
-// 默认主题必须保持与既有截图一致 —— 改这里的值等于改整套观感。
+// sproutTheme 内置默认主题：翠绿（2026-09-19 定调，只求"绿绿的"清新观感，
+// 不用任何 IP 字样）。取色映射：体绿（Accent/OK/PromptOn/渐变 B）、
+// 亮白绿（Heading/渐变 A）、柔红（Err/ErrSoft）、暖橙（Warn 提醒/审批）、
+// 天空蓝（Reply/Link）。仍只前景色；mono 探测器（灰度主题）不受影响。
 var sproutTheme = Theme{
-	Name: "sprout", Desc: "柔绿渐变（默认）",
+	Name: "sprout", Desc: "翠绿（默认）",
 
 	Text: "#D0D0D0", TextHi: "#E6E6E6", Faint: "#8F8F8F", Dim: "#6E6E6E", Strong: "#FFFFFF",
 	Tool: "#9A9A9A", ThoughtPre: "#8A8A8A", ThoughtTtl: "#B4B4B4",
-	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C",
-	Accent: "#00E7A4", OK: "#79C77D", Err: "#C97B7B", ErrSoft: "#D98A8A",
-	Warn: "#FFD166", Reply: "#6FB6F0", PromptOff: "#4A4A4A", PromptOn: "#3CCF7E",
-	Heading: "#E6E6E6", Link: "#6FB6F0", Emph: "#B8B8B8",
+	Rule: "#3E5340", Placeholder: "#5A6A5A", Track: "#3A4A3C",
+	Accent: "#4EE05E", OK: "#8CE28A", Err: "#C97B7B", ErrSoft: "#D98A8A",
+	Warn: "#F5A25C", Reply: "#7CC8F8", PromptOff: "#4E5E4E", PromptOn: "#3FCF52",
+	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC",
 
-	GradA: "#C4F07E", GradB: "#79C77D", GradC: "#4C875F",
+	GradA: "#C8F5A0", GradB: "#5FCC6E", GradC: "#2F7D46",
 }
 
 // monoTheme 灰度主题：全部无色相（R=G=B）。
@@ -291,7 +292,7 @@ func themeSample() string {
 	return b.String()
 }
 
-// runThemeTest 断言 M5c 主题系统：注册表 / /theme 命令 / 渐变几何 /
+// runThemeTest 断言主题系统：注册表 / /theme 命令 / 渐变几何 /
 // mono 全灰（硬编码探测）/ sprout 颜色存在性 / markdown 缓存作废。
 func runThemeTest() {
 	failed := false
@@ -366,19 +367,19 @@ func runThemeTest() {
 
 	applyTheme(sproutTheme)
 	sproutSample := themeSample()
-	okColors := strings.Contains(sproutSample, "38;2;0;231;164") && // 强调绿（用户竖条）
-		strings.Contains(sproutSample, "38;2;121;199;125") && // 成功（工具绿）
+	okColors := strings.Contains(sproutSample, "38;2;78;224;94") && // 体绿（用户竖条）
+		strings.Contains(sproutSample, "38;2;140;226;138") && // 成功（工具绿）
 		strings.Contains(sproutSample, "38;2;201;123;123") && // 失败（工具红）
-		strings.Contains(sproutSample, "38;2;255;209;102") // 提醒（琥珀）
+		strings.Contains(sproutSample, "38;2;245;162;92") // 暖橙（提醒）
 	check("mono：界面样张全灰（无彩色 SGR、无背景色）；sprout：强调/成功/失败/提醒四色都在",
 		monoClean && okColors)
 
-	// ④b M6：markdown 标题/链接颜色来自主题（sprout 实测 #E6E6E6 / #6FB6F0）
+	// ④b M6：markdown 标题/链接颜色来自主题（sprout 实测 #EFF7EA / #7CC8F8）
 	mdOut := ""
 	if out, ok := renderMarkdown("# 标题\n\n[链接](https://example.com)", 60); ok {
 		mdOut = out
 	}
-	okMD := strings.Contains(mdOut, "38;2;230;230;230") && strings.Contains(mdOut, "38;2;111;182;240")
+	okMD := strings.Contains(mdOut, "38;2;239;247;234") && strings.Contains(mdOut, "38;2;124;200;248")
 	check("markdown：标题/链接使用主题色（sprout 实测）", okMD)
 
 	// ⑤ 渐变：10 格、端点 = A / C、50% 填充格 ≥3 种颜色（确实在渐变）
@@ -399,8 +400,8 @@ func runThemeTest() {
 		distinct >= 3
 	bar66 := model{status: stIdle, width: 110, usageUsed: 66000, usageSize: 100000}.renderContextBar()
 	bar91 := model{status: stIdle, width: 110, usageUsed: 91000, usageSize: 100000}.renderContextBar()
-	okTiers := strings.Contains(bar66, "38;2;255;209;102") && !strings.Contains(bar66, probe(grad[0])) &&
-		strings.Contains(bar91, "38;2;201;123;123") && !strings.Contains(bar91, "38;2;255;209;102")
+	okTiers := strings.Contains(bar66, "38;2;245;162;92") && !strings.Contains(bar66, probe(grad[0])) &&
+		strings.Contains(bar91, "38;2;201;123;123") && !strings.Contains(bar91, "38;2;245;162;92")
 	check("上下文条：绿档 = 渐变 A→B→C（填充 5 格 ≥3 色、最左 = A、最右 = C）；黄/红档整段换色",
 		okGrad && okTiers)
 
@@ -420,8 +421,8 @@ func runThemeTest() {
 	beforeLines := strings.Join(probeFeed.itemLines(probeIt), "\n") // 预热缓存（sprout 绿条）
 	applyTheme(monoTheme)
 	afterLines := strings.Join(probeFeed.itemLines(probeIt), "\n")
-	okEpoch := strings.Contains(beforeLines, "38;2;0;231;164") &&
-		!strings.Contains(afterLines, "38;2;0;231;164")
+	okEpoch := strings.Contains(beforeLines, "38;2;78;224;94") &&
+		!strings.Contains(afterLines, "38;2;78;224;94")
 	applyTheme(sproutTheme)
 	check("换主题作废消息条渲染缓存（不 bump ver 也重渲染：绿条 → 灰条）", okEpoch)
 

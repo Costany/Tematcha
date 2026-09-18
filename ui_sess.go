@@ -245,7 +245,7 @@ func runSessTest() {
 		if hasBackgroundColor(ln) {
 			okBG = false
 		}
-		if strings.Contains(ln, "\u276F") && strings.Contains(ln, "38;2;0;231;164") {
+		if strings.Contains(ln, "\u276F") && strings.Contains(ln, "38;2;78;224;94") {
 			okMark = true
 		}
 	}

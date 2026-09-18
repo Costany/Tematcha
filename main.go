@@ -1511,6 +1511,14 @@ func (m model) View() tea.View {
 		sb.WriteString(ln + "\n")
 	}
 
+	// ②.2 追问面板（M5a · elicitation/create）：同一个钉子位；行数已在
+	// syncLayout 里从消息区扣出。真机教训（2026-09-18）：这里漏拼装时布局
+	// 仍会扣高度 —— 面板隐形、键盘却被接管（esc 被吃成 decline，引擎收到
+	// "用户拒绝回答"）。新增面板必须同时过 syncLayout 与 View 两关。
+	for _, ln := range m.renderElicitPanel(m.width) {
+		sb.WriteString(ln + "\n")
+	}
+
 	// ②.5 命令弹层（M4b · §7）：同样的钉子位；行数已在 syncLayout 里从消息区扣出
 	for _, ln := range m.renderCmdPalette() {
 		sb.WriteString(ln + "\n")

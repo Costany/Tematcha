@@ -558,7 +558,7 @@ func (f *Feed) ScrollToItem(it *FeedItem) {
 // userLines 渲染用户消息：左侧一根强调绿竖条 + 正文（不再用 ❯ 前缀）。
 //
 // 两态照 crush：普通态是细线 │，被鼠标点击选中（Focused）后换成半块 ▌
-// ——视觉上"加粗"，两态同色（强调绿 #00E7A4）。
+// ——视觉上"加粗"，两态同色（强调绿 #4EE05E）。
 func userLines(it *FeedItem, w int) []string {
 	bar := "\u2502" // │ 细线
 	if it.Focused {
@@ -1257,7 +1257,7 @@ func runFeedTest() {
 		okDiff := strings.Contains(joined, "← Patch a.txt") &&
 			strings.Contains(joined, "- old line") && strings.Contains(joined, "+ new line")
 		rawJ := strings.Join(wide, "\n")
-		okColor := strings.Contains(rawJ, "38;2;201;123;123") && strings.Contains(rawJ, "38;2;121;199;125")
+		okColor := strings.Contains(rawJ, "38;2;201;123;123") && strings.Contains(rawJ, "38;2;140;226;138")
 		okW := true
 		for _, ln := range wide {
 			if lipgloss.Width(ln) > 76 {
