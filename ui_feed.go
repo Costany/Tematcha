@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 )
@@ -68,6 +69,7 @@ const (
 	kError
 	kTurn    // 回合分隔行：◇ 模型 via 供应商 in 总耗时
 	kReceipt // 审批回执：绿条 ▌ + 说明（§1.6）
+	kWarn    // 客户端护栏提示（M4e）：琥珀 ! 前缀——引擎必拒的命令形态提前拦下
 )
 
 // FeedItem 是消息区里的一条消息。
@@ -468,6 +470,9 @@ func renderItem(it *FeedItem, w int) []string {
 		return sysLines(w, it.Text)
 	case kError:
 		return gutterLines(errStyle, "错误", w, it.Text, it.Detail)
+	case kWarn:
+		// M4e 命令护栏：琥珀 ! + 正文（不是错误——是把引擎必拒的话本地说清）。
+		return labeled("!", 1, w, it.Text, warnStyle, warnStyle)
 	case kTurn:
 		return turnLines(it, w)
 	case kReceipt:
@@ -804,10 +809,14 @@ func sysLines(totalW int, text string) []string {
 }
 
 // gutterLines 错误专用：色条 + 标签 + 正文 + 可选"怎么办"提示行。
+//
+// 宽度预算按"前缀实测宽度"算（前缀 = 2 格缩进 + 「┃ 」2 格 + 标签 + 1 空格）。
+// 早先按 1 格算 gutter，整行整整溢出 2 格——消息区右缘的滚动条列与右栏
+// 被顶着往右挪，用户看到的就是"右侧顶出去了"（见 -feedtest 的宽度断言）。
 func gutterLines(c lipgloss.Style, tag string, totalW int, text, detail string) []string {
 	gutter := c.Render("\u2503") + " "
 	pad := strings.Repeat(" ", lipgloss.Width(tag)+1)
-	textW := totalW - 2 - lipgloss.Width(tag) - 1
+	textW := totalW - lipgloss.Width("  "+gutter+tag+" ")
 	if textW < 8 {
 		textW = 8
 	}
@@ -926,6 +935,18 @@ func runFeedTest() {
 			Text: "文件 `demo-lab/README.md` 在该工作区中不存在；我检查了当前目录，找到的是 `README.md`，其第一行内容为：\n\n" +
 				"```\n# Demo Lab（工具演示沙盒）\n```",
 		},
+		{
+			// 错误行样张（M4e 回归点）：这条就是实机截图里溢出的那行——
+			// 前缀宽度算错时整行会超预算 2 格，把右缘滚动条与右栏顶出去。
+			Kind:   kError,
+			Text:   "回合出错：引擎返回错误: 参数不合法（-32602）：Usage: /resume <session_id>",
+			Detail: "命令的参数没写全——敲 / 打开命令列表，选中回车即可补全参数",
+		},
+		{
+			// 命令护栏提示（M4e）：琥珀 ! 前缀
+			Kind: kWarn,
+			Text: "「/reasoning」还缺参数：off|none|minimal|low|medium|high|xhigh —— 敲 / 打开命令列表，选中回车即可补全",
+		},
 		{Kind: kUsage, Text: "用量 394 / 320000"},
 		{Kind: kTurn, Text: turnSummaryLine("Step 3.7 Flash", "guji", 12*time.Second)},
 	}
@@ -963,6 +984,31 @@ func runFeedTest() {
 	} else {
 		fmt.Println("OK 背景色检查：未检测到背景色序列")
 	}
+
+	// 宽度断言（M4e 回归点）：任何一行超过预算 w，右缘的滚动条列与右栏
+	// 就会被"顶着"往右挪——实机上看到的就是"右侧顶出去了"。
+	// 错误行前缀「  ┃ 错误 」共 9 格，预算少算一格都会在这里现形。
+	fmt.Println()
+	wide := 0
+	for _, ln := range raw {
+		if lw := lipgloss.Width(ln); lw > w {
+			wide++
+			fmt.Printf("!! 超宽行 w=%d > %d：%s\n", lw, w, stripANSI(ln))
+		}
+	}
+	if wide > 0 {
+		fmt.Printf("!! 宽度断言：%d 行超出 %d 格预算\n", wide, w)
+		bad = true
+	} else {
+		fmt.Printf("OK 宽度断言：%d 行全部 ≤ %d 格\n", len(raw), w)
+	}
+
+	fmt.Println()
+	if bad {
+		fmt.Println("feedtest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("feedtest: 全部通过")
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,17 +1129,31 @@ func runScrollTest() {
 	fmt.Printf("  拇指行：底部 %d-%d ｜ 中部 %d-%d ｜ 顶部 %d-%d\n", bf, bl, mf, ml, tf, tl)
 	fmt.Println()
 
-	// ③ View() 集成：行数不变、总宽 ≤ 终端宽、溢出时右缘出现拇指
+	// ③ View() 集成：行数不变、右块锚定（滚动条钉在消息区右缘）、总宽 ≤ 终端宽。
+	// 样张里混进错误行 / 命令护栏 / 工具卡 / 思考块——它们的宽度预算最容易算错，
+	// 一旦某行超宽，右缘的滚动条列与右栏会被顶着往右挪（"右侧顶出去了"）。
 	for _, panel := range []bool{true, false} {
 		vm := model{
 			width: 120, height: 30, feed: NewFeed(), status: stIdle, panelOn: panel,
 			sessionID: "1234abcd-0000-0000-0000-000000000000", sessTitle: "滚动条集成样张",
 			modelLabel: "Step 3.7 Flash", modeID: "default",
+			usageUsed: 87300, usageSize: 320000,
 		}
 		vm.syncLayout()
-		for i := 0; i < 20; i++ {
+		vm.feed.Append(kError, "回合出错：引擎返回错误: 参数不合法（-32602）：Usage: /resume <session_id>")
+		vm.feed.Append(kWarn, "「/reasoning」还缺参数：off|none|minimal|low|medium|high|xhigh —— 敲 / 打开命令列表")
+		vm.feed.Append(kReceipt, "已允许 · shell__exec npm test · 本次会话")
+		vm.feed.Append(kThought, "用户要求读取 demo-lab/README.md 并告诉我第一行是什么。这是一个只读文件访问任务，先读再答。")
+		vm.feed.Append(kAssistant, "文件 `demo-lab/README.md` 在该工作区中不存在；当前目录下找到的是 `README.md`。")
+		tool := vm.feed.Append(kTool, "")
+		tool.ToolName, tool.ToolCall, tool.ToolCmd = "shell__exec", "shell__exec npm test", "npm test"
+		tool.ToolOut = "TAP version 13\n# Subtest: adds numbers\nok 1 - adds numbers\nnot ok 2 - parses config\n"
+		tool.ToolState, tool.ToolExpanded = "in_progress", true
+		tool.touch()
+		for i := 0; i < 12; i++ {
 			vm.feed.Append(kUser, fmt.Sprintf("集成样张第 %d 条：撑出一屏，让滚动条出现。", i))
 		}
+
 		content := vm.View().Content
 		lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 		okRows := len(lines) == vm.height
@@ -1105,14 +1165,34 @@ func runScrollTest() {
 				break
 			}
 		}
-		if !okRows || !okBar || !okWidth {
-			fail("View(panel=%v)：行数=%v 拇指=%v 宽度≤%d=%v", panel, okRows, okBar, vm.width, okWidth)
+		// 右块锚定：消息区每行的第 feed.width 个显示格是滚动条格（┃ 拇指 / │ 轨道），
+		// 右栏分隔「  │ 」钉在它的右边——行一超宽这两处立刻错位。
+		// 注意按"显示格"取字符（CJK 占 2 格，rune 下标不等于列号）。
+		okAnchor := true
+		rows := len(vm.feed.Render())
+		for i := 1; i <= rows && i < len(lines); i++ {
+			rs := stripANSI(lines[i])
+			c, ok := cellAt(rs, vm.feed.width)
+			if !ok || (c != '\u2503' && c != '\u2502' && c != ' ') {
+				okAnchor = false
+				break
+			}
+			if panel {
+				if sep, ok := cellAt(rs, vm.feed.width+3); !ok || sep != '\u2502' {
+					okAnchor = false
+					break
+				}
+			}
+		}
+		if !okRows || !okBar || !okWidth || !okAnchor {
+			fail("View(panel=%v)：行数=%v 拇指=%v 宽度≤%d=%v 右块锚定=%v",
+				panel, okRows, okBar, vm.width, okWidth, okAnchor)
 		}
 		if hasBackgroundColor(content) {
 			fail("View(panel=%v)：检测到背景色序列", panel)
 		}
-		fmt.Printf("  View(panel=%v)：行数 %d/%d ｜ 拇指 %v ｜ 宽度合规 %v\n",
-			panel, len(lines), vm.height, okBar, okWidth)
+		fmt.Printf("  View(panel=%v)：行数 %d/%d ｜ 拇指 %v ｜ 宽度合规 %v ｜ 右块锚定 %v\n",
+			panel, len(lines), vm.height, okBar, okWidth, okAnchor)
 	}
 
 	if bad {
@@ -1146,4 +1226,94 @@ func wrapText(s string, width int) []string {
 		lines = append(lines, string(cur))
 	}
 	return lines
+}
+
+// cellAt 取一行里第 col 个"显示格"上的字符（CJK 按 2 格计；已剥 ANSI）。
+// 该列落在双宽字符中间、或行本身不够长时，ok=false。
+// 自检断言用它按列号找滚动条格——rune 下标在中文行里不等于列号。
+func cellAt(s string, col int) (rune, bool) {
+	w := 0
+	for _, r := range s {
+		if w == col {
+			return r, true
+		}
+		if w > col {
+			return 0, false
+		}
+		w += lipgloss.Width(string(r))
+	}
+	return 0, false
+}
+
+// ansiSeqEnd 返回 s[i:]（i 指向 ESC）这条转义序列的结束下标。
+// 只认 UI 里真实会出现的两类：CSI（ESC [ … 终止字母）与 OSC（ESC ] … BEL/ESC\）；
+// 其它 ESC 序列按两字节处理（ESC + 一个字符）。
+func ansiSeqEnd(s string, i int) int {
+	if i+1 >= len(s) {
+		return len(s)
+	}
+	switch s[i+1] {
+	case '[': // CSI：参数/中间字节后跟一个终止字母（0x40-0x7E）
+		j := i + 2
+		for j < len(s) {
+			c := s[j]
+			if c >= 0x40 && c <= 0x7E {
+				return j + 1
+			}
+			j++
+		}
+		return len(s)
+	case ']': // OSC：BEL 或 ESC \ 收尾
+		j := i + 2
+		for j < len(s) {
+			if s[j] == 0x07 {
+				return j + 1
+			}
+			if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+			j++
+		}
+		return len(s)
+	}
+	return i + 2
+}
+
+// clipLine 把一行硬裁到 w 格以内（最后一道保险，不参与正常排版）：
+// 渲染器各自按预算折行，这里兜底——任何一行的超宽都会把右缘的滚动条列
+// 与右栏顶着往右挪（用户看到的是"右侧顶出去了"，见 gutterLines 注释）。
+//
+// ANSI 感知：转义序列整段照抄、不计数；CJK 按 2 格计；被裁时以 … 收尾
+// 并补一个 reset（免得半截样式染到行尾）。
+func clipLine(s string, w int) string {
+	if w <= 1 || lipgloss.Width(s) <= w {
+		return s
+	}
+	var b strings.Builder
+	used := 0
+	limit := w - 1 // 留一格给 …
+	styled := false
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b {
+			j := ansiSeqEnd(s, i)
+			styled = true
+			b.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		rw := lipgloss.Width(string(r))
+		if used+rw > limit {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+		i += size
+	}
+	b.WriteString("\u2026")
+	if styled {
+		b.WriteString("\x1b[0m")
+	}
+	return b.String()
 }

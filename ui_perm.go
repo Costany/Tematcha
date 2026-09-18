@@ -188,8 +188,9 @@ func (m *model) settlePermCancelled(p *PermRequest) {
 // 整屏行数恒定（面板钉在输入区上方、随内容上推，不悬浮遮挡）。
 func (m *model) syncLayout() {
 	panelH := len(m.renderPermPanel(m.width))
-	cmdH := len(m.renderCmdPalette()) // M4b：命令弹层也钉在输入区上方，一起让位
-	h := m.height - 6 - panelH - cmdH
+	cmdH := len(m.renderCmdPalette())     // M4b：命令弹层也钉在输入区上方，一起让位
+	sessH := len(m.renderSessionPicker()) // M4d：会话选择列表同理
+	h := m.height - 6 - panelH - cmdH - sessH
 	if h < 3 {
 		h = 3
 	}

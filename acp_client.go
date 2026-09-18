@@ -234,7 +234,7 @@ func (c *ACPClient) Call(method string, params map[string]any, timeout time.Dura
 	select {
 	case res := <-ch:
 		if e, ok := res["__error__"]; ok {
-			return nil, fmt.Errorf("引擎返回错误: %v", e)
+			return nil, fmt.Errorf("引擎返回错误: %s", acpErrorMessage(e))
 		}
 		return res, nil
 	case <-timer:
@@ -323,6 +323,27 @@ func (c *ACPClient) CancelTurn(sessionID string) {
 	_ = c.Notify("session/cancel", map[string]any{"sessionId": sessionID})
 }
 
+// ListSessions 列出可载入的会话（session/list）。letcode 单页返回、不发行游标，
+// 列表本就按引擎服务的工作区过滤，所以不带 cwd 过滤参数。
+// 返回值是原样的 sessions 数组（每条一个 map，字段名见 ui_sess.go 顶部注释）。
+func (c *ACPClient) ListSessions() ([]any, error) {
+	res, err := c.Call("session/list", map[string]any{}, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return asList(res["sessions"]), nil
+}
+
+// LoadSession 载入一条会话（session/load）：引擎先把历史重放成 session/update
+// 通知（只有文本），再回应答 {modes, configOptions}。重放可能很长，超时给足。
+func (c *ACPClient) LoadSession(sessionID, cwd string) (map[string]any, error) {
+	return c.Call("session/load", map[string]any{
+		"sessionId":  sessionID,
+		"cwd":        cwd,
+		"mcpServers": []any{},
+	}, 120*time.Second)
+}
+
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
@@ -359,4 +380,38 @@ func anyToInt64(v any) int64 {
 func asMap(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
+}
+
+// acpErrLabels JSON-RPC 标准错误码 → 中文短标签（先说清"是哪一类问题"）。
+var acpErrLabels = map[int64]string{
+	-32700: "解析错误",
+	-32600: "请求被拒",
+	-32601: "方法不存在",
+	-32602: "参数不合法",
+	-32603: "引擎内部错误",
+}
+
+// acpErrorMessage 把 JSON-RPC 错误对象转成人话：
+//
+//	map[code:-32602 message:Usage: /resume <session_id>]
+//	→ 参数不合法（-32602）：Usage: /resume <session_id>
+//
+// letcode 的斜杠命令被拒走的就是这条通道（-32602 = 用法没写全，
+// -32600 = 会话设置被拒），原始形态是 Go 的 map 打印，读起来太生硬。
+func acpErrorMessage(e any) string {
+	em := asMap(e)
+	if em == nil {
+		return fmt.Sprintf("%v", e)
+	}
+	code := anyToInt64(em["code"])
+	msg, _ := em["message"].(string)
+	label := acpErrLabels[code]
+	switch {
+	case label != "" && msg != "":
+		return fmt.Sprintf("%s（%d）：%s", label, code, msg)
+	case msg != "":
+		return msg
+	default:
+		return fmt.Sprintf("%v", e)
+	}
 }

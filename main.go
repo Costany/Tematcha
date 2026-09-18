@@ -43,6 +43,7 @@ const (
 	stCancelled  = "cancelled"
 	stError      = "error"
 	stEngineGone = "engine-gone"
+	stLoading    = "loading"
 )
 
 // ---------------------------------------------------------------------------
@@ -129,6 +130,23 @@ type model struct {
 	// 其余按键自动退出模式后照常处理（打字直接续上）。
 	cardNav *FeedItem
 
+	// M4c 输入历史：sent = 已发送文本（跳过空串与连续重复）；histOn/histIdx = 浏览位置
+	//（histOn=false 表示没在翻）；histDraft = 开翻前的草稿（↓ 越过最新一条时还原）。
+	// 只活在内存里：不落盘、跨会话不保留。
+	sent      []string
+	histOn    bool
+	histIdx   int
+	histDraft string
+
+	// M4d 会话列/载：sessOn = 选择列表开着；sessReady = 列表已读回来（"空列表"与
+	// "还没读回来"是两种状态）；sessRows/sessSel = 数据与选中；loading = 正在等
+	// session/load 的应答（引擎会先把历史重放成 update 通知，期间对话区只读）。
+	sessOn    bool
+	sessReady bool
+	sessRows  []SessionRow
+	sessSel   int
+	loading   bool
+
 	// 权限流（M2a）：perm = 正在展示的请求；permQueue = 排队等待的请求
 	perm      *PermRequest
 	permQueue []*PermRequest
@@ -182,9 +200,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		return m.handleTurnDone(msg)
 
+	case sessListMsg:
+		m.sessReady = true
+		if msg.err != nil {
+			m.sessOn = false
+			m.feed.Append(kError, "读取会话列表失败："+msg.err.Error())
+		} else {
+			m.sessRows = msg.rows
+			m.sessSel = 0
+		}
+		m.syncLayout()
+		return m, nil
+
+	case sessLoadDoneMsg:
+		m.loading = false
+		m.busy = false
+		if msg.err != nil {
+			m.status = stError
+			m.feed.Append(kError, "载入会话失败："+msg.err.Error())
+		} else {
+			m.sessionID = msg.id
+			m.status = stDone
+			m.feed.Append(kSys, "已载入会话 "+msg.id)
+		}
+		m.syncLayout()
+		return m, nil
+
 	case acpClosedMsg:
 		if m.status != stEngineGone {
 			m.busy = false
+			m.loading = false
 			m.clearCursor()
 			m.exitCardNav()
 			m.dropPerms("引擎连接断开")
@@ -252,6 +297,47 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// 会话选择列表（M4d）：↑↓ 选、enter 载入、esc 关闭；开着时其余键不进输入框。
+	// 排在权限面板之后、命令弹层之前 —— 它是更"重"的模态。
+	if m.sessOn {
+		switch k.String() {
+		case "esc":
+			m.sessOn = false
+			m.syncLayout()
+			return m, nil
+		case "up":
+			if m.sessSel > 0 {
+				m.sessSel--
+			}
+			return m, nil
+		case "down":
+			if m.sessSel < len(m.sessRows)-1 {
+				m.sessSel++
+			}
+			return m, nil
+		case "enter":
+			if len(m.sessRows) == 0 {
+				return m, nil
+			}
+			row := m.sessRows[m.sessSel]
+			m.sessOn = false
+			m.loading = true
+			m.busy = true // 载入期间禁发：引擎同一时刻只安装一条会话
+			m.status = stLoading
+			m.clearCursor()
+			m.endThoughtCycle()
+			m.endAssistantSegment()
+			m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
+			m.tools = make(map[string]*FeedItem)
+			m.feed = NewFeed() // 重放会把整套历史重新上屏：先清旧画面
+			m.feed.Append(kSys, "载入会话 "+row.ID+"（引擎将重放历史）")
+			m.syncLayout()
+			return m, loadSessionAsync(m.client, row.ID)
+		default:
+			return m, nil
+		}
+	}
+
 	// 命令弹层（M4b）：↑↓/tab/enter/esc 归它；其余键落回输入框（过滤实时更新）。
 	// 必须排在选择态与滚动键之前 —— 弹层开着时 ↑↓ 是"选命令"、tab 是"补全"，
 	// 不是滚消息、也不是进工具卡选择态。
@@ -291,6 +377,15 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// M4c 输入历史：输入框空着（或正在翻历史）时 ↑↓ 归历史；其余情形照旧滚消息区。
+	// 放在滚动分支之前 —— 历史消费掉按键就不再滚，没消费就原样落回滚动。
+	if k.String() == "up" || k.String() == "down" {
+		if m.histMove(k.String() == "up") {
+			m.syncLayout() // 召回的文字可能触发/收起命令弹层，布局跟着重算
+			return m, nil
+		}
+	}
+
 	// 滚动键：up/down 一次 1 行，pgup/pgdown 一次 8 行
 	switch k.String() {
 	case "up":
@@ -327,12 +422,14 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.status = stCancelling
 		} else {
 			m.input.Clear()
+			m.histOn = false // M4c：清空输入 = 退出历史浏览
 		}
 	}
 	// 输入内容变了：命令弹层复位（esc 的关闭状态清掉、选中收拢）+ 布局重算
-	//（弹层要占输入区上方的行，高度得从消息区扣）
+	//（弹层要占输入区上方的行，高度得从消息区扣）；手改过也退出历史浏览
 	if m.input.Text() != before {
 		m.palHidden, m.palSel = false, 0
+		m.histOn = false
 		m.syncLayout()
 	}
 	return m, nil
@@ -396,7 +493,27 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// M4d：/resume（不带参数）归客户端 —— 引擎只认 "/resume <session_id>"，
+	// 这里换成弹出会话选择列表，挑完再用 session/load 载入。
+	if isResumeOnly(text) {
+		m.input.Clear()
+		m.histPush(text)
+		m.sessOn, m.sessReady, m.sessSel = true, false, 0
+		m.sessRows = nil
+		m.syncLayout()
+		return m, fetchSessions(m.client)
+	}
+
+	// M4e：命令护栏 —— 引擎必拒的形态（缺参数 / 参数越界 / 本地专有命令）
+	// 在本地用一句琥珀提示说清楚：不发引擎、不动输入框（用户接着补参数）。
+	if guard, blocked := m.cmdGuard(text); blocked {
+		m.feed.ScrollToBottom()
+		m.feed.Append(kWarn, guard)
+		return m, nil
+	}
+
 	m.input.Clear()
+	m.histPush(text) // M4c：发送过的内容进历史（↑↓ 可召回）
 	m.feed.ScrollToBottom()
 	m.feed.Append(kUser, text)
 
@@ -425,7 +542,8 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 	m.dropPerms("回合已结束")    // 回合收尾后，挂起的审批请求已失去意义
 	switch {
 	case msg.err != nil:
-		m.feed.Append(kError, "回合出错："+msg.err.Error())
+		it := m.feed.Append(kError, "回合出错："+msg.err.Error())
+		it.Detail = engineErrorHint(msg.err.Error())
 		m.status = stError
 	case msg.reason == "cancelled":
 		m.feed.Append(kSys, "回合已取消")
@@ -440,6 +558,22 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
 	return m, nil
+}
+
+// engineErrorHint 给引擎错误配一句"怎么办"（kError 的 Detail 行，渲染成暗色提示）。
+// 覆盖实测见过的三类：命令用法没写全、本地专有命令、会话设置被拒（推理档位等）。
+func engineErrorHint(s string) string {
+	switch {
+	case strings.Contains(s, "Usage: /"):
+		return "命令的参数没写全——敲 / 打开命令列表，选中回车即可补全参数"
+	case strings.Contains(s, "is not available over ACP"):
+		return "这条命令是 letcode 本地 TUI 专有，ACP 模式下不可用"
+	case strings.Contains(s, "reasoning effort change"):
+		return "当前模型/供应商不接受该推理档位——可先 /model 换模型，或用 /reasoning 查看可选值"
+	case strings.Contains(s, "rejected the session"):
+		return "引擎拒绝了这次会话设置变更（多为模型/供应商限制）"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +609,14 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 		return
 	}
 	switch kind, _ := upd["sessionUpdate"].(string); kind {
+	case "user_message_chunk":
+		// M4d：只在 session/load 的重放里出现（正常回合的用户消息由本地回显，
+		// 引擎不发）。每来一条 = 上一段正文 / 思考周期到此为止。
+		m.endAssistantSegment()
+		m.endThoughtCycle()
+		if text := chunkText(upd); text != "" {
+			m.feed.Append(kUser, text)
+		}
 	case "agent_message_chunk":
 		m.endThoughtCycle() // 回答开始 = 上一段思考周期结束（定格其耗时）
 		if text := chunkText(upd); text != "" {
@@ -948,6 +1090,11 @@ func (m model) View() tea.View {
 		panelLines = m.renderPanel(len(feedLines))
 	}
 	for i, ln := range feedLines {
+		// 兜底：渲染器已各自按预算折行；万一有一行超宽，右缘的滚动条列
+		// 与右栏会被"顶着"往右挪（截图上就是"右侧顶出去了"）。
+		if lipgloss.Width(ln) > m.feed.width {
+			ln = clipLine(ln, m.feed.width)
+		}
 		b := ""
 		if i < len(bar) {
 			b = bar[i]
@@ -977,6 +1124,11 @@ func (m model) View() tea.View {
 
 	// ②.5 命令弹层（M4b · §7）：同样的钉子位；行数已在 syncLayout 里从消息区扣出
 	for _, ln := range m.renderCmdPalette() {
+		sb.WriteString(ln + "\n")
+	}
+
+	// ②.6 会话选择列表（M4d · /resume）：同一个钉子位
+	for _, ln := range m.renderSessionPicker() {
 		sb.WriteString(ln + "\n")
 	}
 
@@ -1045,6 +1197,10 @@ func main() {
 	panelTest := flag.Bool("paneltest", false, "渲染右栏样张（会话/上下文/待办 自检）")
 	scrollTest := flag.Bool("scrolltest", false, "滚动条几何自检（不溢出/底部/中部/顶部 + View 集成）")
 	cmdTest := flag.Bool("cmdtest", false, "命令弹层自检（解析/过滤/渲染/键位/模态互斥）")
+	histTest := flag.Bool("histtest", false, "输入历史自检（入栈/翻历史/让位滚动/编辑退出）")
+	sessTest := flag.Bool("sesstest", false, "会话列表自检（解析/触发/渲染/键位/submit 拦截）")
+	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
+	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
 	trace := flag.Bool("trace", false, "把 ACP 原始流量落盘到 acp-trace.log（排障用）")
 	flag.Parse()
 
@@ -1100,6 +1256,26 @@ func main() {
 		return
 	}
 
+	if *histTest {
+		runHistTest()
+		return
+	}
+
+	if *sessTest {
+		runSessTest()
+		return
+	}
+
+	if *sessions {
+		runSessionsProbe(traceTo)
+		return
+	}
+
+	if *loadID != "" {
+		runLoadProbe(*loadID, traceTo)
+		return
+	}
+
 	if *smoke != "" {
 		cancelAfter := time.Duration(0)
 		if *smokeCancel {
@@ -1146,6 +1322,98 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		fmt.Println("TUI 退出:", err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// -sessions / -load：会话列 / 载的真实链路探针（无 TTY）
+// ---------------------------------------------------------------------------
+
+// runSessionsProbe（-sessions）起引擎、握手、真拉一次 session/list 并打印结果。
+func runSessionsProbe(traceTo string) {
+	fmt.Println("正在启动 letcode 引擎……")
+	client, err := StartACP(letcodeExe, workspace, stderrLog, traceTo)
+	if err != nil {
+		fmt.Println("启动失败:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+	if _, err := client.Initialize(); err != nil {
+		fmt.Println("initialize 失败:", err)
+		os.Exit(1)
+	}
+	raw, err := client.ListSessions()
+	if err != nil {
+		fmt.Println("session/list 失败:", err)
+		os.Exit(1)
+	}
+	rows := parseSessions(raw)
+	fmt.Printf("session/list 返回 %d 条：\n", len(rows))
+	for i, r := range rows {
+		if i >= 10 {
+			fmt.Printf("  … 还有 %d 条\n", len(rows)-i)
+			break
+		}
+		fmt.Printf("  %s  %s  %s\n", r.ID, sessStamp(r.Updated), r.Title)
+	}
+}
+
+// runLoadProbe（-load <id>）真载入一条会话：一边等应答、一边数重放来的 update，
+// 并打印头几条文本的摘录（验证 user/agent chunk 的渲染素材确实到了）。
+func runLoadProbe(id, traceTo string) {
+	fmt.Println("正在启动 letcode 引擎……")
+	client, err := StartACP(letcodeExe, workspace, stderrLog, traceTo)
+	if err != nil {
+		fmt.Println("启动失败:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+	if _, err := client.Initialize(); err != nil {
+		fmt.Println("initialize 失败:", err)
+		os.Exit(1)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.LoadSession(id, workspace)
+		done <- err
+	}()
+
+	user, agent, other := 0, 0, 0
+	printed := 0
+	deadline := time.After(90 * time.Second)
+loop:
+	for {
+		select {
+		case ev := <-client.Events:
+			if ev.Method != "session/update" {
+				other++
+				continue
+			}
+			upd := asMap(ev.Params["update"])
+			kind, _ := upd["sessionUpdate"].(string)
+			switch kind {
+			case "user_message_chunk":
+				user++
+			case "agent_message_chunk":
+				agent++
+			default:
+				other++
+			}
+			if (kind == "user_message_chunk" || kind == "agent_message_chunk") && printed < 4 {
+				if text := chunkText(upd); text != "" {
+					printed++
+					fmt.Printf("  [%s] %s\n", kind, clipWidth(strings.ReplaceAll(text, "\n", " "), 100))
+				}
+			}
+		case err := <-done:
+			fmt.Printf("session/load 返回：err=%v\n", err)
+			break loop
+		case <-deadline:
+			fmt.Println("等待超时（90s）")
+			break loop
+		}
+	}
+	fmt.Printf("重放统计：user=%d agent=%d 其它=%d\n", user, agent, other)
 }
 
 // ---------------------------------------------------------------------------

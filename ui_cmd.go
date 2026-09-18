@@ -261,6 +261,94 @@ func (m *model) completeCmd(c AvailCmd) {
 }
 
 // ---------------------------------------------------------------------------
+// M4e：客户端命令护栏（把"引擎必拒"的形态提前拦下来）
+// ---------------------------------------------------------------------------
+
+// localOnlyCmds letcode 本地 TUI 专有、ACP 前端用不了的命令
+// （引擎收到会回 "<cmd> is not available over ACP"）。
+//
+// 出处：letcode src/command.rs 的命令表（command_metadata，32 条）
+// 减去 src/acp/slash.rs 广告给 ACP 的 9 条。护栏只对"引擎没广告过"的名字
+// 生效——将来引擎把某条放行，available_commands_update 一到就自动让位。
+var localOnlyCmds = []string{
+	"help", "?", "exit", "quit",
+	"perm", "language", "lang", "agents",
+	"think", "thoughts", "tools", "tool-output",
+	"scrollbar", "panel", "theme", "fake", "tree",
+	"context", "mcp", "skill", "child", "children", "parent",
+}
+
+// typedCommandName 拆输入里的命令名与参数（"/model test/model" → "model"、"test/model"）。
+// 切法与引擎一致：第一个空白前是名字，其余是参数；不是 "/词" 形态则 ok=false。
+func typedCommandName(text string) (name, arg string, ok bool) {
+	if !strings.HasPrefix(text, "/") {
+		return "", "", false
+	}
+	body := text[1:]
+	if i := strings.IndexAny(body, " \t"); i >= 0 {
+		return body[:i], strings.TrimSpace(body[i+1:]), true
+	}
+	return body, "", true
+}
+
+// hintValues 参数提示若是"取值清单"（a|b|c 形态）就拆成各值；否则返回 nil
+// （"model id" / "session id" 这类自由文本提示不参与校验）。
+func hintValues(hint string) []string {
+	if !strings.Contains(hint, "|") {
+		return nil
+	}
+	parts := strings.Split(hint, "|")
+	for _, p := range parts {
+		if p == "" || strings.ContainsAny(p, " <>()[]{}") {
+			return nil
+		}
+	}
+	return parts
+}
+
+// cmdGuard 客户端侧的命令护栏：拦下引擎必拒的三种形态，返回给用户看的一句话
+// （blocked=false = 放行，照常发给引擎）：
+//
+//	① 广告命令缺参数        → 引擎回 "Usage: /…"
+//	② 参数不在取值清单里    → 引擎同样回 "Usage: /…"
+//	③ 引擎不认的本地专有命令 → 引擎回 "… is not available over ACP"
+//
+// 本地说得清的就本地说清：不发引擎、不清输入框（用户接着补参数），
+// 省一次白跑的往返，也不用对着一条引擎错误发愣。
+func (m model) cmdGuard(text string) (string, bool) {
+	name, arg, ok := typedCommandName(text)
+	if !ok || name == "" {
+		return "", false
+	}
+	for _, c := range m.cmds {
+		if c.Name != name {
+			continue
+		}
+		if c.Hint == "" {
+			return "", false // 不带参数的命令：引擎直接执行
+		}
+		if arg == "" {
+			return "「/" + c.Name + "」还缺参数：" + c.Hint + " —— 敲 / 打开命令列表，选中回车即可补全", true
+		}
+		if vals := hintValues(c.Hint); vals != nil {
+			for _, v := range vals {
+				if strings.EqualFold(v, arg) {
+					return "", false
+				}
+			}
+			return "「/" + c.Name + "」没有 " + arg + " 这个取值；可选：" + c.Hint + " —— 敲 / 打开命令列表", true
+		}
+		return "", false
+	}
+	for _, n := range localOnlyCmds {
+		if n == name {
+			return "「/" + name + "」是 letcode 本地 TUI 专有命令，ACP 模式下引擎不接受 —— 敲 / 看可用命令", true
+		}
+	}
+	return "", false // 不是命令：当普通提问，照常发给引擎
+}
+
+// ---------------------------------------------------------------------------
 // -cmdtest：弹层数据 / 过滤 / 渲染 / 键位自检（无 TTY / 无引擎）
 // ---------------------------------------------------------------------------
 
@@ -513,6 +601,37 @@ func runCmdTest() {
 		okRow := len(rows) == 1 && strings.Contains(stripANSI(rows[0]), "model id") &&
 			len(mm.palMatches()) == 1 && mm.cmds[mm.palMatches()[0]].Name == "model"
 		check("端到端：实机 update JSON → handleSessionUpdate → 过滤 /mo 只剩 /model", okJSON && okCmds && okRow)
+	}
+
+	// ⑩ M4e 命令护栏：引擎必拒的形态在本地拦下（缺参数 / 参数越界 / 本地专有），
+	// 其余（合法命令、带参数命令、普通提问）一律放行。
+	{
+		gm := model{feed: NewFeed(), cmds: engineCmds()}
+		msg, blocked := gm.cmdGuard("/reasoning")
+		okBare := blocked && strings.Contains(msg, "还缺参数") &&
+			strings.Contains(msg, "off|none|minimal|low|medium|high|xhigh")
+		msg, blocked = gm.cmdGuard("/permission plan")
+		okBadVal := blocked && strings.Contains(msg, "没有 plan 这个取值") && strings.Contains(msg, "safe|default|auto|yolo")
+		_, okGoodVal := gm.cmdGuard("/reasoning high")
+		_, okResumeID := gm.cmdGuard("/resume 1789672451669-37748-0")
+		_, okNoArg := gm.cmdGuard("/compact")
+		msg, blocked = gm.cmdGuard("/context")
+		okLocal := blocked && strings.Contains(msg, "ACP")
+		_, okUnknown := gm.cmdGuard("/notacommand")
+		_, okChat := gm.cmdGuard("解释一下这段代码")
+		check("护栏：缺参数 / 参数越界 / 本地专有命令被拦；合法命令与普通文本放行",
+			okBare && okBadVal && okLocal && !okGoodVal && !okResumeID && !okNoArg && !okUnknown && !okChat)
+		fmt.Printf("  护栏样张（拦下的话长这样）：%s\n", msg)
+
+		// submit 走护栏：不发引擎、不清输入框、消息区落一条 kWarn 琥珀提示
+		sm := model{width: 100, feed: NewFeed(), status: stIdle, cmds: engineCmds()}
+		sm.input.SetText("/reasoning")
+		nextS, cmd := sm.submit()
+		sm = nextS.(model)
+		okFeed := sm.feed.Len() == 1 && sm.feed.items[0].Kind == kWarn &&
+			strings.Contains(sm.feed.items[0].Text, "还缺参数")
+		check("submit('/reasoning')：不发引擎 / 输入保留 / 消息区落一条琥珀提示",
+			len(sm.sent) == 0 && okFeed && sm.input.Text() == "/reasoning" && cmd == nil && !sm.busy)
 	}
 
 	if failed {

@@ -287,6 +287,8 @@ func (m model) engineStateText() string {
 		return replyStyle.Render("回复中" + dots(m.blinkN))
 	case stCancelling:
 		return warnStyle.Render("取消中…")
+	case stLoading:
+		return replyStyle.Render("载入会话…")
 	case stDone:
 		return dimStyle.Render("回合结束")
 	case stCancelled:
@@ -442,8 +444,17 @@ func (m model) hintText() string {
 	if m.perm != nil {
 		return "y 允许一次  \u00B7  a 始终允许  \u00B7  n 拒绝  \u00B7  esc 取消"
 	}
+	if m.sessOn {
+		return "\u2191\u2193 选择  \u00B7  enter 载入  \u00B7  esc 关闭"
+	}
+	if m.loading {
+		return "会话载入中\u2026"
+	}
 	if m.palOpen() {
 		return "\u2191\u2193 选择  \u00B7  tab 补全  \u00B7  enter 执行  \u00B7  esc 关闭"
+	}
+	if m.histOn {
+		return "\u2191\u2193 翻历史  \u00B7  enter 发送  \u00B7  esc 清空"
 	}
 	if m.cardNav != nil {
 		return "\u2191\u2193 选择卡片  \u00B7  enter 展开/收起  \u00B7  esc 退出"
