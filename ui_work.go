@@ -156,7 +156,7 @@ func closeStyle(kind int) lipgloss.Style {
 
 // workStripLines 工作区（M11）：输入栏正上方的一行"引擎在干嘛"。
 //   - 忙时（普通回合）= 工作行（乱码 + 静点 + 状态词 + 时长 + ≈token）；
-//   - 忙时（压缩回合）= 进度条 + 百分比（只此两项，见 compactProgressLine）；
+//   - 忙时（压缩回合）= 英文提示 + 定长进度条 + 百分比（见 compactProgressLine）；
 //   - 闲时 = 上一回合的收尾行（收尾语 / 压缩收据，handleTurnDone 落好）；
 //   - 都没有 → 不占行。
 //
@@ -174,8 +174,9 @@ func (m model) workStrip() string {
 	w := m.blockWidth()
 	if m.busy {
 		if m.compactReq {
-			// 压缩：只有进度条 + 百分比（不放状态词、不放乱码 —— 用户点名）。
-			return m.compactProgressLine(w)
+			// 压缩：英文提示 + 定长进度条 + 百分比（用户点名：条不横跨终端、
+			// 提示用英文；不放状态词、不放乱码）。窄屏 clipLine 兜底硬裁。
+			return clipLine(m.compactProgressLine(), w)
 		}
 		return clipLine(m.workingLine(), w)
 	}

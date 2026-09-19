@@ -10,9 +10,10 @@
 //
 // M11（2026-09-19 用户点菜）：压缩可视化从消息区搬进"工作区"（输入栏上方，
 // 见 ui_work.go 的 workStripLines）——
-//   - 进行中只有"进度条 + 百分比"：不放状态词、不放乱码；
+//   - 进行中 = 英文提示 + 定长进度条 + 百分比：不放状态词、不放乱码；
 //   - 进度条从左往右填充（不再是一道来回扫的光）：填充段 = 主题渐变，
-//     未填充 = 暗格 ░；
+//     未填充 = 暗格 ░；定长 compactBarCells 格、不横跨终端（2026-09-19
+//     用户点菜"跟 Claude Code 那样长就行了"）；
 //   - 进度是模拟值：随时间渐近推进、封顶 compactProgCap，观察到用量下降时
 //     跳 100%；回合结束时工作区收成一行结论（收据 / 未见下降 / 取消 / 失败）。
 package main
@@ -35,6 +36,11 @@ const (
 	// compactProgT 渐近曲线的时间常数（秒）：p(t) = cap · t / (t + T)。
 	// 前几秒涨得快、越往后越慢——引擎不给进度时的保守模拟，不装精确。
 	compactProgT = 5.0
+	// compactBarCells 压缩进度条格数（定长）：用户点名"不要让压缩条横跨整个
+	// 终端，跟 Claude Code 那样长就行了"——条前放英文提示，整行约 55 格。
+	compactBarCells = 30
+	// compactHint 压缩进行中的提示（用户点名"提示用英文"）。
+	compactHint = "Compacting context"
 )
 
 // isCompactCmd 输入是否正好是 /compact（引擎广告命令，无参数）。
@@ -68,10 +74,11 @@ func (m *model) stepCompactProg() {
 	m.compactProg = compactProgAt(time.Since(m.turnStart))
 }
 
-// compactProgressLine 压缩进度条（工作区 · §8）：从左往右填充 + 百分比。
-// 填充段 = 主题渐变（A→B→C）逐格取色；未填充 = 暗格 ░；右端百分比
+// compactProgressLine 压缩进度条（工作区 · §8）：英文提示 + 定长进度条 + 百分比。
+// 定长 compactBarCells 格（不随终端宽度横跨——用户点名"跟 Claude Code 那样长
+// 就行了"）；填充段 = 主题渐变（A→B→C）逐格取色；未填充 = 暗格 ░；右端百分比
 // （100% 转柔绿）。只前景色（透明度原则）——mono 主题下自然退化为灰阶。
-func (m model) compactProgressLine(w int) string {
+func (m model) compactProgressLine() string {
 	p := m.compactProg
 	if p < 0 {
 		p = 0
@@ -80,25 +87,22 @@ func (m model) compactProgressLine(w int) string {
 		p = 100
 	}
 	suffix := fmt.Sprintf(" %3d%%", p) // "  0%".."100%"
-	barW := w - lipgloss.Width(suffix)
-	if barW < 10 {
-		barW = 10
-	}
+	barW := compactBarCells
 	fill := barW * p / 100
 	grad := contextBarGrad(barW)
 	var b strings.Builder
 	for i := 0; i < barW; i++ {
 		if i < fill {
-			b.WriteString(lipgloss.NewStyle().Foreground(grad[i]).Render("\u2588"))
+			b.WriteString(lipgloss.NewStyle().Foreground(grad[i]).Render("█"))
 		} else {
-			b.WriteString(ruleStyle.Render("\u2591"))
+			b.WriteString(ruleStyle.Render("░"))
 		}
 	}
 	st := dimStyle
 	if p >= 100 {
 		st = toolOKStyle
 	}
-	return b.String() + st.Render(suffix)
+	return dimStyle.Render(compactHint) + "  " + b.String() + st.Render(suffix)
 }
 
 // scaleBright 把颜色按系数缩放亮度（k<1 压暗、k>1 提亮，色相不变）。
@@ -254,23 +258,35 @@ func runCompactTest() {
 	check("进度模拟：0 起步、单调增、封顶 96（时间渐近曲线）",
 		p0 == 0 && p3 > 0 && p3 < p20 && p20 < pLong && pLong <= compactProgCap)
 
-	// ③ 工作区进度条：1 行、左起填充、右端百分比、不放状态词/乱码/静点；只前景色。
+	// ③ 工作区进度条：1 行、英文提示 + 定长条 + 百分比、不放状态词/乱码/静点；
+	// 只前景色。定长 = 同样内容在宽/窄终端下条格数不变（用户点名"不要让压缩条
+	// 横跨整个终端，跟 Claude Code 那样长就行了"）。
 	mp := model{width: 110, status: stThinking, busy: true, compactReq: true, compactProg: 42}
 	strip := mp.workStripLines()
 	plain := ""
 	if len(strip) == 1 {
 		plain = stripANSI(strip[0])
 	}
+	barCells := func(width int) int {
+		mm := model{width: width, busy: true, compactReq: true, compactProg: 42}
+		ls := mm.workStripLines()
+		if len(ls) != 1 {
+			return -1
+		}
+		s := stripANSI(ls[0])
+		return strings.Count(s, "█") + strings.Count(s, "░")
+	}
 	okBar := len(strip) == 1 &&
+		strings.HasPrefix(plain, "  "+compactHint) && // 英文提示在前（用户点名）
 		strings.Contains(plain, "42%") &&
-		strings.Contains(plain, "\u2588") && strings.Contains(plain, "\u2591") &&
-		strings.HasPrefix(plain, "  \u2588") && // 填充从最左开始
+		strings.Contains(plain, "█") && strings.Contains(plain, "░") &&
 		!strings.Contains(plain, workDots) &&
 		!strings.Contains(plain, "思考中") && !strings.Contains(plain, "回复中") &&
 		!strings.Contains(plain, "正在整理") &&
 		lipgloss.Width(strip[0]) <= mp.blockWidth()+2 &&
-		!hasBackgroundColor(strip[0])
-	check("工作区进度条：左起填充 + 百分比、无状态词/乱码/静点、只前景色", okBar)
+		!hasBackgroundColor(strip[0]) &&
+		barCells(110) == compactBarCells && barCells(80) == compactBarCells // 定长：不随宽度伸缩
+	check("工作区进度条：英文提示 + 定长条 + 百分比、无状态词/乱码/静点、只前景色", okBar)
 
 	// ③b 填充随进度增长：p=80 的 █ 比 p=20 多；p=100 无未填充格；p=0 无填充格
 	countBlock := func(p int) int {
@@ -365,6 +381,31 @@ func runCompactTest() {
 	// ⑨ 错误指纹：引擎拒绝压缩时有"怎么办"提示
 	hint := engineErrorHint("letcode could not compact the session context: context is already within budget")
 	check("指纹：could not compact → 有本地提示", strings.Contains(hint, "压缩"))
+
+	// ⑩ /compact 不回显（用户点名"不要出现 /compact 的字样留在上面"）：submit
+	// 后消息区零条目、可视化全在工作区；localEcho 仍登记（引擎回显被消费，
+	// 不落屏）。busy 时不入队（排队会以 kQueued 留痕），给等待提示。对照：
+	// 普通消息照常回显（别把 /compact 的特殊逻辑溢出去）。
+	em := model{width: 100, feed: NewFeed(), status: stIdle}
+	em.input.SetText("/compact")
+	sm2, _ := em.submit()
+	em = sm2.(model)
+	okNoEcho := em.compactReq && em.busy && em.feed.Len() == 0 && em.localEcho == "/compact"
+
+	bm := model{width: 100, feed: NewFeed(), status: stReplying, busy: true}
+	bm.input.SetText("/compact")
+	bm2, _ := bm.submit()
+	bm = bm2.(model)
+	okBusy := !bm.compactReq && len(bm.queue) == 0 && bm.feed.Len() == 1 &&
+		strings.Contains(feedTexts(bm), "再压缩")
+
+	nm3 := model{width: 100, feed: NewFeed(), status: stIdle}
+	nm3.input.SetText("你好")
+	nm4, _ := nm3.submit()
+	nm3 = nm4.(model)
+	okEcho := countKind(nm3, kUser) == 1 && nm3.localEcho == "你好"
+	check("submit：/compact 不回显（localEcho 仍登记）；busy 时提示等待不入队；普通消息照常回显",
+		okNoEcho && okBusy && okEcho)
 
 	// 样张（人眼核对）
 	fmt.Println("  压缩进度条样张（p=8 / p=42 / p=88 / p=100）：")

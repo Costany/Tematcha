@@ -870,15 +870,30 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.input.Clear()
 	m.histPush(text) // M4c：发送过的内容进历史（↑↓ 可召回）
 
+	// /compact 不回显（用户点名"不要出现 /compact 的字样留在上面"）：压缩的
+	// 可视化整个在工作区（英文提示 + 进度条 + 百分比），消息区不留痕。localEcho
+	// 仍要登记——引擎回合开始会回发同文本 user_message_chunk，不登记就会被
+	// 当成普通用户消息落屏（那就前功尽弃了）。
+	compact := isCompactCmd(text)
+
 	// M3c：回合进行中 → 排队。消息先以 kQueued 落在消息区（暗色 +「· 排队中」），
-	// 回合结束由 handleTurnDone 出队转正（原地变回正常用户消息）并自动接着发。
+	// 当前回合结束由 handleTurnDone 出队转正（原地变回正常用户消息）并自动接着发。
 	if m.busy {
+		if compact {
+			// 压缩也要独占一个空闲回合（同 /resume 口径）：排队会让 "/compact"
+			// 以 kQueued 形态留在消息区，与"不留痕"打架，直接提示等待。
+			m.feed.ScrollToBottom()
+			m.feed.Append(kSys, "回合进行中：先等它结束（或 esc 取消）再压缩")
+			return m, nil
+		}
 		m.feed.ScrollToBottom()
 		m.queue = append(m.queue, m.feed.Append(kQueued, text))
 		return m, nil
 	}
-	m.feed.ScrollToBottom()
-	m.feed.Append(kUser, text)
+	if !compact {
+		m.feed.ScrollToBottom()
+		m.feed.Append(kUser, text)
+	}
 	m.localEcho = text // 引擎会回发同文本 user_message_chunk：登记待消费，防重复显示
 	return m.beginTurn(text)
 }
