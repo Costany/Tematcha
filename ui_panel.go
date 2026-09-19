@@ -187,7 +187,7 @@ func runPanelTest() {
 		if w > panelW {
 			bad = true
 		}
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			bad = true
 		}
 		fmt.Printf("%s  (w=%d)\n", stripANSI(ln), w)
@@ -248,7 +248,7 @@ func runPanelTest() {
 	fmt.Println("== View() 集成抽查 ==")
 	fmt.Printf("  行数 %d/%d：%v ｜ 分隔列：%v ｜ 右栏内容：%v ｜ 宽度≤%d：%v\n",
 		len(lines), vm.height, okRows, okSep, okPanel, vm.width, okWidth)
-	if hasBackgroundColor(content) {
+	if hasStrayBackground(content) {
 		bad = true
 		fmt.Println("  !! 背景色检查：检测到背景色序列")
 	} else {
@@ -353,7 +353,7 @@ func runTodosTest() {
 		if lipgloss.Width(ln) > m.feed.width {
 			okW = false
 		}
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			okBG = false
 		}
 	}

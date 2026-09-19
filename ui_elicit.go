@@ -710,7 +710,7 @@ func runElicitTest() {
 		if lipgloss.Width(ln) > m.blockWidth() {
 			okW = false
 		}
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			okBG = false
 		}
 	}
@@ -804,7 +804,7 @@ func runElicitTest() {
 				break
 			}
 		}
-		if hasBackgroundColor(content) {
+		if hasStrayBackground(content) {
 			okVW = false
 		}
 		check("View() 集成：行数不变 / 面板可见 / 宽度合规 / 背景干净", okRows && okShow && okVW)

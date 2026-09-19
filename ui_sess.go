@@ -80,8 +80,9 @@ type sessListMsg struct {
 
 // sessLoadDoneMsg session/load 的应答（历史重放已在此之前到达）。
 type sessLoadDoneMsg struct {
-	id  string
-	err error
+	id    string
+	title string // 列表行的标题：session/load 应答里没有它，只能从这儿带过去
+	err   error
 }
 
 // fetchSessions 去引擎拉会话列表。
@@ -106,15 +107,15 @@ func fetchSessions(c *ACPClient) tea.Cmd {
 // 事故：/resume 后只剩三条提问，回答全不见了），把 loading/busy 提前翻假，
 // 后面的 agent chunk 就走 lastAssistant 合并路径。塞回同一条 FIFO 通道即与
 // 重放严格保序。
-func loadSessionAsync(c *ACPClient, id string) tea.Cmd {
+func loadSessionAsync(c *ACPClient, id, title string) tea.Cmd {
 	return func() tea.Msg {
 		if c == nil {
-			return sessLoadDoneMsg{id: id, err: fmt.Errorf("没有可用的引擎连接")}
+			return sessLoadDoneMsg{id: id, title: title, err: fmt.Errorf("没有可用的引擎连接")}
 		}
 		_, err := c.LoadSession(id, workspace)
 		c.Events <- ACPEvent{
 			Method: methodLoadDone,
-			Params: map[string]any{"id": id},
+			Params: map[string]any{"id": id, "title": title},
 			Err:    err,
 		}
 		return noopMsg{}
@@ -254,7 +255,7 @@ func runSessTest() {
 		if lipgloss.Width(ln) > m.blockWidth() {
 			okW = false
 		}
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			okBG = false
 		}
 		if strings.Contains(ln, "\u276F") && strings.Contains(ln, "38;2;78;224;94") {
@@ -379,7 +380,8 @@ func runLoadTest() {
 			case ev := <-c.Events:
 				if ev.Method == methodLoadDone {
 					id, _ := ev.Params["id"].(string)
-					nm, _ := m.finishLoad(id, ev.Err)
+					title, _ := ev.Params["title"].(string)
+					nm, _ := m.finishLoad(id, title, ev.Err)
 					mv := nm.(model)
 					m = &mv
 					continue
@@ -415,6 +417,25 @@ func runLoadTest() {
 	check("收尾状态：loading/busy 释放、status=done、会话 id 落账",
 		!m.loading && !m.busy && m.status == stDone && m.sessionID == "1789816533057-27968-0")
 
+	// ①b 会话标题透传（2026-09-19 用户截图：/resume 回来右栏显示「未命名」）。
+	// session/load 应答里没有标题，引擎的 session_info_update 也只在会话被命名/
+	// 改名时才发（letcode projection.rs 的 SessionTitleUpdated 分支）——所以标题
+	// 只能由 loadSessionAsync 从列表那一行塞进合成事件，finishLoad 再落账。
+	c2 := &ACPClient{Events: make(chan ACPEvent, 4), Closed: make(chan struct{})}
+	c2.Events <- ACPEvent{Method: methodLoadDone, Params: map[string]any{
+		"id": "1789672451669-37748-0", "title": "修复 ACP 权限回执"}}
+	t2 := drain(newLoading(), c2)
+	check("标题透传：finishLoad 把列表行标题写进右栏（不再显示「未命名」）",
+		t2.sessTitle == "修复 ACP 权限回执")
+
+	// ①c 空标题不覆盖：列表行没标题时保持原样（不写成空串把已有标题擦掉）
+	c3 := &ACPClient{Events: make(chan ACPEvent, 4), Closed: make(chan struct{})}
+	c3.Events <- ACPEvent{Method: methodLoadDone, Params: map[string]any{"id": "x"}}
+	t3 := newLoading()
+	t3.sessTitle = "旧标题"
+	t3 = drain(t3, c3)
+	check("空标题不覆盖：列表行无标题时保留原值", t3.sessTitle == "旧标题")
+
 	// ② 护栏：loading 期间即便 busy 已假、lastAssistant 非空，也不合并
 	g := newLoading()
 	replay(g, "user_message_chunk", "问一")
@@ -444,7 +465,7 @@ func runLoadTest() {
 
 	// ⑤ 失败路径：finishLoad 带 err → 错误行 + status=error，且不落"已载入"
 	e := newLoading()
-	ev, _ := e.finishLoad("x", fmt.Errorf("引擎内部错误：session transcript is already open for writing"))
+	ev, _ := e.finishLoad("x", "", fmt.Errorf("引擎内部错误：session transcript is already open for writing"))
 	em := ev.(model)
 	check("失败路径：落错误行、status=error、不谎报已载入",
 		em.status == stError && countKind(&em, kError) == 1 &&

@@ -58,6 +58,7 @@
 - **现状（M1.6 实装）**：回答区**不再带任何前缀符号**（铅笔 ✎ 退役）；整块 2 格缩进、无前缀，轮次区隔交给回合分隔行（§1.7）。glamour 透明样式 / OSC 8 剥离 / 行尾填充剥离见 `md.go`；粗体 = 白 + bold
 - **现状（M1.7 实装）**：行内代码配色由 glamour dark 默认的粉红（256 色 203 = `#FF5F87`）改为强调绿 `#00E7A4`（`md.go` 的 `transparentDarkStyle` 里改 `Code.Color`）；表格/列表里的 `` `文件名` `` 等因此跟着变绿
 - **现状（M1.8 实装，2026-09-18）**：回答按"段落"渲染（与思考同款边界：其它类型事件到来 = 段落结束）——每次 LLM 迭代的正文（工具调用前的过渡语、最终总结）各自成为独立条目、出现在流的当时位置。教训：早先一个回合共用一个条目槽位，多段正文全并进第一段出现的位置（画面外上方），最终回复看起来像"没回就结束"（详见 §15 ⑮；同日加固：迟到 chunk 并回上一段，防"应答先到"的通道竞争把正文尾巴挤到分隔行下方）
+- **现状（M1.9 实装，2026-09-19）**：**防晃眼配色**（用户反馈"晃眼""加粗巨晃，白色晃""绿色也晃眼睛"，附 crush 对照截图）——正文基色接主题 `Text`（`#D0D0D0`，此前不设色吃终端默认近白）；粗体从纯白 `#FFFFFF` 换柔白 `#ECEBF0`（charmtone Sash，crush 的最亮中性色，仍亮于正文但不刺）；行内代码从强调绿 `#4EE05E` 换低饱和鼠尾草绿 `#8FBF9F`（新 `Theme.Code` token——强调绿给小面积竖条正好、给行内文字太刺）；代码块 chroma 的 `Text` 基色同样接主题 `Text`（chroma 只给语法制导着色，纯文本部分原沿用 dark 亮色）。取证与决策见 §15 ㊺
 
 ### 1.3 思考块（Thought）
 
@@ -87,8 +88,11 @@
 ### 1.5 错误块
 
 - 数据：引擎 error 事件 / ACP 错误响应 ✅（例："a prompt turn is already running"、"letcode could not compact the session context: …"、"Fast mode unavailable"、"Usage: /model <id>"）
-- 形态：`error` 小标签 + 红字正文 + 浅红左条；保留在历史可回看
-- **宽度预算（M4e 修，2026-09-18）**：错误行前缀 = 「2 格缩进 + `┃ ` 2 格 + 标签 + 1 空格」共 9 格，`textW = 总宽 - 前缀实测宽`；**曾经按 gutter 1 格算** → 整行超预算 2 格，右缘的滚动条列与右栏被"顶着"往右挪（用户原话"右侧顶出去了"；像素取证：错误行的滚动条列比邻行右移 24px ≈ 2 格）。两道保险：`-feedtest` 逐行宽度断言 + `View()` 组装时 `clipLine` 兜底截断（ANSI 感知，超宽才触发）
+- 形态：**ERROR 徽章 + 正文 + 可选提示行**；保留在历史可回看
+  - **徽章（2026-09-19 用户点菜，照 crush）**：标签从"错误"改为 `ERROR`，并给它一个方块——**白字 + 低饱和红底**（`Theme.ErrBadge`，sprout `#AC5A5E` / mono `#8C8C8C`）。用户原话："将错误改为 ERROR，然后 ERROR 要给个方块，ERROR 是白色的，方块是红色底，注意这个红色纯度不许很高，就好像 crush 那样"
+  - **这是全应用唯一一处铺底色**——§0.5 的透明度原则在此让位给错误的辨识度（徽章只 7 格，不是大块底色；mono 主题下退化为灰底，仍过 mono 全灰探测器）。自检侧同步：`hasBackgroundColor` → **`hasStrayBackground`**（唯一合法底色 = 徽章色，其余出现即回归）
+- **宽度预算（M4e 修，2026-09-18）**：错误行前缀 = 「2 格缩进 + 徽章 + 1 空格」共 9 格，`textW = 总宽 - 前缀实测宽`；**曾经按 gutter 1 格算** → 整行超预算 2 格，右缘的滚动条列与右栏被"顶着"往右挪（用户原话"右侧顶出去了"；像素取证：错误行的滚动条列比邻行右移 24px ≈ 2 格）。两道保险：`-feedtest` 逐行宽度断言 + `View()` 组装时 `clipLine` 兜底截断（ANSI 感知，超宽才触发）
+- **出错时不做收尾装饰（2026-09-19 用户点菜）**：`msg.err != nil` 时——① **不落回合分隔行**（`◇ 模型 via 供应商 in 时长`；用户原话"也不要显示 XX模型 via xx in xxms"——出错的信息量全在 ERROR 块里，"哪个模型、多久才失败"是噪音）；② **工作区收尾行整行留空**（原来会落"半路卡壳 · 10ms"；`closeLine = ""` 即不占行）。取消回合不受影响（仍显示"中途收兵 · Xs"）
 - **"怎么办"提示行（M4e 新增）**：`FeedItem.Detail` → 错误块尾补一行暗色 `提示: …`（命令用法类 → 引导用 `/` 补全；本地专有命令 → 说明 ACP 下不可用；推理档位被拒 → 提示换模型 / 查可选值）
 - **折行规则（M4e 打磨，2026-09-18）**：`wrapText` 的折行点优先落在空白（词边界）上——英文 / 路径 / 命令名不被拦腰截断（此前会出现「…或用 /reasonin」+「g 查看可选值」）；找不到空白（超长 URL、长代码行）才退化成按宽度硬切；折行点上的空白被吃掉，不飘到下一行行首。`-feedtest` 有对应断言（样张 `["提示:" "当前模型不接受该推理档位——可先" "/model 换模型，或用" "/reasoning 查看可选值"]`）
 
@@ -315,7 +319,20 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 
 - 强调绿定为 `#4EE05E`（体绿系，清新明快；旧值 `#00E7A4` 青绿随 2026-09-19 色板重定调退役），用于**小面积强调元素**：用户消息竖条（§1.1）、行内代码（§1.2）、滚动条拇指、弹层/列表选中 ❯
 - **家族关系（M5c 定论，2026-09-18；色值随 M7 更新）**：强调绿不并入渐变锚点、也不替换 B —— 它是独立 token（`Theme.Accent`），专管小面积强调；渐变 A/B/C 管"沿长度过渡"的元素（上下文条）。"成功"语义色独立为 `OK`（`#8CE28A` 柔绿），与强调绿同族不同值
-- 落点（M5c 起）：`theme.go` 的 `Accent` token；渲染点 = `ui_feed.go` 的 `userBarStyle` / `scrollThumbStyle`、`md.go` 的 `Code.Color`
+- 落点（M5c 起）：`theme.go` 的 `Accent` token；渲染点 = `ui_feed.go` 的 `userBarStyle` / `scrollThumbStyle`、弹层/列表选中 ❯（**行内代码 2026-09-19 起改走 `Code` token，见下**）
+- **粗体色（2026-09-19 二次调整）**：`Theme.Strong` 从柔白 `#ECEBF0` 再降到**低纯度绿白 `#D9E7D7`**（mono 保持 `#F0F0F0` 灰）——用户反馈"纯白加粗太晃眼了，给点绿色吧，但是不要给太多！不要太高纯度"。G−R = 14、G−B = 16，绿意很淡但读得出；仍亮于正文 `#D0D0D0`，粗体的"强调"语义不变
+
+**防晃眼配色（2026-09-19 · 用户反馈"晃眼"，取证 crush）**：
+
+- 病灶：正文不设色吃终端默认近白；粗体硬刷 `#FFFFFF` 纯白；行内代码用强调绿 `#4EE05E`——大面积阅读区里这三样叠加就是"晃眼"
+
+- crush 取证（`study/refs/crush/internal/ui/styles/`）：主题走 charmtone 命名色板（`themes.go`），markdown 配方见 `quickstyle.go`——正文 = Smoke `#BFBCC8` 柔和灰紫、**粗体只加粗不换色**（继承正文色）、行内代码低饱和。charmtone 源（`github.com/charmbracelet/x/exp/charmtone`）：最亮中性 Sash `#ECEBF0`、柔和灰紫 Smoke `#BFBCC8`
+
+- 我们的取值（只动颜色、不动结构；仍只前景色）：正文 = `Theme.Text` `#D0D0D0`；粗体 = `Theme.Strong` `#ECEBF0`（柔白，crush 最亮中性色）；行内代码 = `Theme.Code` `#8FBF9F`（低饱和鼠尾草绿，新增 token）；代码块 chroma `Text` 基色同样接 `Theme.Text`
+
+- `mono` 对应值：Strong `#F0F0F0` / Code `#B0B0B0`（全灰，仍过 mono 全灰探测器）
+
+- 自检：`-mdtest` 新增"防晃眼检查"（正文/柔白粗体/柔绿代码在场 + 纯白 `#FFFFFF` 缺席）；`-themetest` 新增 ④c（sprout 与 mono 双主题对照）
 
 ## 11.6 灵动感设计（参考 pi，2026-09-17 定调）
 
@@ -467,4 +484,6 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - 2026-09-19 ㊶ /resume 只剩提问（真机事故修复）= **"应答"与"重放"在两条通道上赛跑，完成事件被当普通 tea.Msg 返回就会插队**：用户截图——/resume 回去只剩三连问，回答全不见了（其实都有回答）。根因链：`loadSessionAsync` 在 goroutine 里等 `session/load` 应答并直接 `return sessLoadDoneMsg{...}`；而读循环是**先把整段历史重放一条条推进 `c.Events`、然后才把应答交给等的 Call()**，UI 却是一个 tea 周期才消费一条事件（每条还要重新 arm `waitEvent`）——完成事件于是插到重放中间，`finishLoad` 把 `loading`/`busy` 提前翻假，后续 `agent_message_chunk` 全部走 `lastAssistant` 合并路径（那是给"应答先到、正文 chunk 后到"设计的），回答并进**第一条**助手消息、被顶到消息区上方看不见。修法两件：① 完成事件改走事件通道——`loadSessionAsync` 把合成事件（`methodLoadDone`）塞回 `c.Events`，与重放同一条 FIFO，天然排在最后（`ACPEvent` 加 `Err` 字段承载错误，`Update` 的 `acpEventMsg` 分支分流到 `finishLoad`）；② 合并路径加 `!m.loading` 护栏 + 载入中不抢状态栏/流式光标（双保险，防将来再出现时序漂移）。自检 `-loadtest` 9 项（重放保序 / 条目顺序 / 完成落最后 / 收尾状态 / 两道护栏 / 失败路径 / 重放照收）。**教训入册：跨 goroutine 的"完成信号"与流式事件必须走同一条有序通道**（同源问题：回合应答 `turnDoneMsg` 也走独立通道，所以才有 lastAssistant 那套补丁——载入场景不该复用那套）
 - 2026-09-19 ㊷ 引擎侧重放边界（已知边界 · 2026-09-19 用户确认=期望行为，不动 letcode）= **`session/load` 的重放来自引擎的"活跃协议帧"（模型上下文），不是会话全史**：`engine.rs` 用 `restored_messages_from_protocol_frames(active_protocol_frames())` 构造应答前的重放，`runtime_context.rs` 的 `active_protocol_frames()` 只取 `visibility == Active` 的帧——**压缩（`history_applied`）退休掉的旧历史不进重放**，且 `driver.rs` 的 `replay_history` 还会跳过 `ConversationRole::Summary`、只发文本（工具卡不入内）。实测（`-load <id>` 探针）：纯聊天会话完整重放（user=3/agent=3）；压缩过的长会话几乎空（user=1/agent=0、甚至 0/0）。**2026-09-19 用户定夺（原话「我就是要之前的会话看不见，从压缩成功的会话开始」）：保持现状、不动 letcode**——压缩过的会话 /resume 就从压缩点开始、旧历史不显示，这正是用户想要的；若将来想要按全史重放（顺带把工具卡也放回来），需用户另行批准再动引擎
 - 2026-09-19 ㊸ 压缩 UI 收口（用户点菜 · 三项）= **"条别横跨、/compact 别留痕、提示用英文"**：① 进度条从"撑满工作区宽度"改为**定长 30 格**（`compactBarCells`，同样内容在宽/窄终端下格数不变——"就跟 Claude Code 那样长就行了"），条前加英文提示 `Compacting context`（"提示用英文"；窄屏 clipLine 兜底硬裁）；② **`/compact` 不再作为用户消息回显**——submit 识别到它时消息区零条目（压缩可视化整个在工作区），但 `localEcho` 照登记（引擎回合开始回发的同文本 `user_message_chunk` 必须被消费掉，否则以普通用户消息落屏、前功尽弃）；busy 时也不入队（排队会以 kQueued 留痕），同 /resume 口径给"先等它结束再压缩"提示；③ 自检 `-compacttest` 扩到 11 项（新增：定长不随宽度变化/英文提示前缀/submit 不回显+busy 拦截+普通消息照常回显的对照）。**另记一条已知边界**：完成判定（usage 降 ≥5 个百分点）在小上下文场景永远摸不到——320k 窗口的 5pp = 16k，而整个上下文才 9.3k（2.9%），压到 0 也凑不够阈值；此时"压缩请求已完成（未观察到用量下降）"是诚实回退、非 bug
+- 2026-09-19 ㊻ 三项打磨（用户点菜 · 附四张截图）= ① **`/resume` 回来右栏会话标题显示「未命名」**：根因是 `session/load` 的应答里**没有标题**，而引擎的 `session_info_update` 只在会话被命名/改名时才发（letcode `projection.rs` 的 `SessionTitleUpdated` 分支，源码取证）——客户端手里明明有标题（会话列表那一行），只是没往下传。修法：`loadSessionAsync(c, id, title)` 把标题塞进合成事件 `Params`，`finishLoad(id, title, err)` 落 `m.sessTitle`（空标题不覆盖，防把已有标题擦成空串）。② **粗体再降纯度**：`Strong` `#ECEBF0` → 低纯度绿白 `#D9E7D7`（mono 仍 `#F0F0F0`）——"给点绿色吧，但不要给太多、不要太高纯度"。③ **错误呈现照 crush 改三处**：标签 `错误` → `ERROR`（白字 + 低饱和红底方块，新增 `Theme.ErrBadge` token，sprout `#AC5A5E` / mono `#8C8C8C`）；出错时**不落回合分隔行**、**工作区收尾行整行留空**（原"半路卡壳 · 10ms"）。**透明度原则的唯一例外落定**：徽章那 7 格是全部应用里唯一合法的底色——自检统一改走 `hasStrayBackground`（白名单放行徽章色，其余出现即回归）。自检：`-feedtest` 新增徽章断言（底色恰一处 + 行内含 ERROR）、`-loadtest` 扩到 11 项（标题透传 / 空标题不覆盖）、`-mdtest`/`-themetest` 粗体 RGB 同步；全量 21 套绿
+- 2026-09-19 ㊺ 防晃眼配色（用户点菜 · crush 对照取证）= **"晃眼"的根源是纯白 + 亮绿，不是对比度不够**：用户口径"你不觉得 crush 看着很舒服么？没错，那就是他的字体不是纯白色的""很晃眼，尤其是加粗出现的时候，巨晃，白色晃，单引号扩的绿色字体的那个绿色也晃眼睛"（附 crush 与我们两侧截图）。取证 crush 源码：`internal/ui/styles/themes.go`（charmtone 命名色板）+ `internal/ui/styles/quickstyle.go`（markdown 配方：正文 Smoke `#BFBCC8` 柔和灰紫、**粗体只加粗不换色**、行内代码低饱和）；charmtone 源从 GitHub raw 拉取核对（最亮中性 Sash `#ECEBF0`）。改动（只动颜色、不动结构、仍只前景色）：① 正文基色接 `Theme.Text`（`#D0D0D0`）——此前 `Document` 不设色，吃终端默认近白，而回答区是大段阅读区；② 粗体 `Strong` 从 `#FFFFFF` 换柔白 `#ECEBF0`（仍亮于正文但不刺）；③ 行内代码从 `Accent` `#4EE05E` 改走**新增 `Theme.Code` token** `#8FBF9F`（低饱和鼠尾草绿——强调绿与小面积用户竖条同色，给竖条正好、给行内文字太刺）；④ 代码块 chroma `Text` 基色接 `Theme.Text`（chroma 只给语法制导着色，纯文本部分原沿用 dark 亮色，大段代码块白底白字最晃）。`mono` 对应 Strong `#F0F0F0` / Code `#B0B0B0`（仍过全灰探测器）。自检：`-mdtest` 新增"防晃眼检查"（正文/柔白粗体/柔绿代码在场 + 纯白缺席）、`-themetest` 新增 ④c（sprout/mono 双主题对照）；全量 21 套绿。**教训：粗体在 CJK 终端本就常无视觉变化（中文字体普遍无粗体变体），所以颜色就是强调本身——选色要按"大面积阅读"的尺度而不是"小面积点缀"的尺度**
 - 2026-09-19 ㊹ 品牌移位 + 乱码对齐 crush + 工作行瘦身（用户点菜 · 三项）= ① **`letcode` 字样从底部状态栏左上挪到右栏最上方**（"好像 crush 一样"）：`renderPanel` 头部加品牌行（modelStyle）+ 一行呼吸空白；状态栏去掉品牌前缀（忙时左段为空即整段留白，宽度守恒）；② **乱码速度对齐 crush**：`study/refs/crush/internal/ui/anim/anim.go` 取证 fps=20 → 工作行心跳 120ms 改 50ms；连带把流式光标翻转改**墙钟驱动**（`cursorAt`，每 500ms——否则 50ms 心跳下光标频闪）；省略号（点）**颜色跟随主题渐变**（dotsBlock，亮度曲线与乱码块一致，字符仍不重掷）；③ **工作行瘦身**（"太挤了，尤其是 token 那里"）：token 段撤下 ↓（本回合字符数 ÷4）只留 `≈↑used`，turnChars 照常累加备恢复。自检 `-worktest` 扩到 7 项（新增静态点渐变断言）

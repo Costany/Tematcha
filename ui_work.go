@@ -280,7 +280,7 @@ func runWorkTest() {
 	okBlock := lipgloss.Width(a0) == workScrambleN &&
 		a0 != scrambleBlock(1, 0) &&
 		a0 == scrambleBlock(0, 0) &&
-		!hasBackgroundColor(a0)
+		!hasStrayBackground(a0)
 	check("乱码块：8 格宽、逐帧重掷、同参可复现、多色（亮度渐变）、只前景色",
 		okBlock && len(colors) >= 3)
 
@@ -293,7 +293,7 @@ func runWorkTest() {
 		strings.Contains(plain, "12s") &&
 		strings.Contains(plain, "≈↑31.8k") &&
 		!strings.Contains(plain, "↓") && // 2026-09-19：token 只留 ↑
-		!hasBackgroundColor(m.workingLine())
+		!hasStrayBackground(m.workingLine())
 	check("工作行：乱码+点+思考中+12s+≈↑31.8k（无↓）；只前景色", okLine)
 
 	// ②c 静态点跟随渐变：字符不重掷（同参稳定），但多色（亮度渐变）
@@ -303,7 +303,7 @@ func runWorkTest() {
 		dotColors[c] = true
 	}
 	okDots := lipgloss.Width(dots) == len(workDots) &&
-		dots == dotsBlock() && len(dotColors) >= 3 && !hasBackgroundColor(dots)
+		dots == dotsBlock() && len(dotColors) >= 3 && !hasStrayBackground(dots)
 	check("静态点：不重掷（稳定）、跟随主题渐变（多色）、只前景色", okDots)
 
 	// ②b 缺项自动跳过：没起点 / 没用量 → 只剩乱码 + 点 + 状态词
@@ -333,7 +333,7 @@ func runWorkTest() {
 		strings.Contains(stripANSI(strip2[0]), workDots) &&
 		strings.Contains(stripANSI(strip2[0]), "思考中") &&
 		lipgloss.Width(strip2[0]) <= m2.blockWidth()+2 &&
-		!hasBackgroundColor(strip2[0])
+		!hasStrayBackground(strip2[0])
 	m3 := model{width: 110, status: stDone, closeLine: "一气呵成 · 12s", closeKind: closePlain}
 	strip3 := m3.workStripLines()
 	okIdle := len(strip3) == 1 && strings.Contains(stripANSI(strip3[0]), "一气呵成 · 12s")

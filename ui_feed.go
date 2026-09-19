@@ -29,18 +29,19 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	textStyle    lipgloss.Style // 正文
-	userBarStyle lipgloss.Style // 用户消息左侧竖条（强调绿）
-	thoughtPre   lipgloss.Style // 思考前缀
-	thoughtTtl   lipgloss.Style // 思考标题
-	thoughtTxt   lipgloss.Style // 思考正文（暗）
-	toolStyle    lipgloss.Style // 工具行（进行中）
-	toolOKStyle  lipgloss.Style // 工具行·成功（柔绿）
-	toolErStyle  lipgloss.Style // 工具行·失败（柔红）
-	toolOutStyle lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
-	dimStyle     lipgloss.Style // 次要信息
-	errStyle     lipgloss.Style // 错误（柔红）
-	accentStyle  lipgloss.Style // 强调色（追问面板边条/标题等小面积强调）
+	textStyle     lipgloss.Style // 正文
+	userBarStyle  lipgloss.Style // 用户消息左侧竖条（强调绿）
+	thoughtPre    lipgloss.Style // 思考前缀
+	thoughtTtl    lipgloss.Style // 思考标题
+	thoughtTxt    lipgloss.Style // 思考正文（暗）
+	toolStyle     lipgloss.Style // 工具行（进行中）
+	toolOKStyle   lipgloss.Style // 工具行·成功（柔绿）
+	toolErStyle   lipgloss.Style // 工具行·失败（柔红）
+	toolOutStyle  lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
+	dimStyle      lipgloss.Style // 次要信息
+	errStyle      lipgloss.Style // 错误（柔红）
+	errBadgeStyle lipgloss.Style // 错误徽章 ERROR（白字 + 低饱和红底；§0.5 唯一底色例外）
+	accentStyle   lipgloss.Style // 强调色（追问面板边条/标题等小面积强调）
 
 	// 光标：反色格子 —— 与主题无关（反色不是颜色）
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
@@ -594,7 +595,7 @@ func renderItem(it *FeedItem, w int) []string {
 	case kSys:
 		return sysLines(w, it.Text)
 	case kError:
-		return gutterLines(errStyle, "错误", w, it.Text, it.Detail)
+		return errLines(w, it.Text, it.Detail)
 	case kWarn:
 		// M4e 命令护栏：琥珀 ! + 正文（不是错误——是把引擎必拒的话本地说清）。
 		return labeled("!", 1, w, it.Text, warnStyle, warnStyle)
@@ -984,29 +985,34 @@ func sysLines(totalW int, text string) []string {
 	return out
 }
 
-// gutterLines 错误专用：色条 + 标签 + 正文 + 可选"怎么办"提示行。
+// errLines 错误块（§1.5）：ERROR 徽章 + 正文 + 可选"怎么办"提示行。
 //
-// 宽度预算按"前缀实测宽度"算（前缀 = 2 格缩进 + 「┃ 」2 格 + 标签 + 1 空格）。
-// 早先按 1 格算 gutter，整行整整溢出 2 格——消息区右缘的滚动条列与右栏
-// 被顶着往右挪，用户看到的就是"右侧顶出去了"（见 -feedtest 的宽度断言）。
-func gutterLines(c lipgloss.Style, tag string, totalW int, text, detail string) []string {
-	gutter := c.Render("\u2503") + " "
-	pad := strings.Repeat(" ", lipgloss.Width(tag)+1)
-	textW := totalW - lipgloss.Width("  "+gutter+tag+" ")
+// 2026-09-19 用户点菜（照 crush）：标签从"错误"改为 ERROR，并给它一个方块——
+// 白字 + 低饱和红底（Theme.ErrBadge）。这是全应用唯一一处铺底色：§0.5 的
+// 透明度原则在此让位给错误的辨识度（徽章只 7 格，不是大块底色；mono 主题
+// 下退化为灰底，仍过 mono 全灰探测器）。
+//
+// 宽度预算按"前缀实测宽度"算（前缀 = 2 格缩进 + 徽章 + 1 空格）。早先按 1 格
+// 算 gutter，整行整整溢出 2 格——消息区右缘的滚动条列与右栏被顶着往右挪，
+// 用户看到的就是"右侧顶出去了"（见 -feedtest 的宽度断言）。
+func errLines(totalW int, text, detail string) []string {
+	badge := errBadgeStyle.Render(" ERROR ")
+	pad := strings.Repeat(" ", lipgloss.Width(badge)+1)
+	textW := totalW - lipgloss.Width("  "+badge+" ")
 	if textW < 8 {
 		textW = 8
 	}
 	var out []string
 	for i, ln := range wrapText(text, textW) {
 		if i == 0 {
-			out = append(out, "  "+gutter+c.Render(tag)+" "+textStyle.Render(ln))
+			out = append(out, "  "+badge+" "+textStyle.Render(ln))
 		} else {
-			out = append(out, "  "+gutter+pad+textStyle.Render(ln))
+			out = append(out, "  "+pad+textStyle.Render(ln))
 		}
 	}
 	if detail != "" {
 		for _, ln := range wrapText("提示: "+detail, textW) {
-			out = append(out, "  "+gutter+pad+dimStyle.Render(ln))
+			out = append(out, "  "+pad+dimStyle.Render(ln))
 		}
 	}
 	return out
@@ -1157,19 +1163,43 @@ func runFeedTest() {
 	fmt.Println()
 	bad := false
 	for _, ln := range raw {
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			bad = true
 		}
 	}
 	if bad {
-		fmt.Println("!! 背景色检查：检测到背景色序列（透明度原则被破坏）")
+		fmt.Println("!! 背景色检查：检测到计划外背景色序列（透明度原则被破坏）")
 	} else {
-		fmt.Println("OK 背景色检查：未检测到背景色序列")
+		fmt.Println("OK 背景色检查：只有 ERROR 徽章一处合法底色，其余无背景色")
+	}
+
+	// ERROR 徽章断言（2026-09-19 用户点菜，照 crush）：白字 + 低饱和红底，
+	// 且只出现在错误行——标签从"错误"换成 ERROR。徽章底色 = 主题 ErrBadge。
+	//
+	// 注意：只校验**徽章那一行**的可见文本（样张正文里本来就可能出现"错误"
+	// 二字，那是引擎错误消息的内容，不是标签）。
+	fmt.Println()
+	badgeSeq := "48;2;" + rgbTriple(lipgloss.Color(activeTheme.ErrBadge))
+	badgeRows, badgeOK := 0, false
+	for _, ln := range raw {
+		if !strings.Contains(ln, badgeSeq) {
+			continue
+		}
+		badgeRows++
+		plain := stripANSI(ln)
+		badgeOK = strings.Contains(plain, "ERROR") && !strings.HasPrefix(strings.TrimSpace(plain), "错误")
+	}
+	okBadge := badgeRows == 1 && badgeOK
+	if okBadge {
+		fmt.Printf("OK ERROR 徽章：白字 + 红底 %s，恰好在错误行出现一次，标签已是 ERROR\n", activeTheme.ErrBadge)
+	} else {
+		bad = true
+		fmt.Printf("!! ERROR 徽章断言失败（底色 %d 处 / 行内容合规 %v）\n", badgeRows, badgeOK)
 	}
 
 	// 宽度断言（M4e 回归点）：任何一行超过预算 w，右缘的滚动条列与右栏
 	// 就会被"顶着"往右挪——实机上看到的就是"右侧顶出去了"。
-	// 错误行前缀「  ┃ 错误 」共 9 格，预算少算一格都会在这里现形。
+	// 错误行前缀「  ERROR 」共 9 格，预算少算一格都会在这里现形。
 	fmt.Println()
 	wide := 0
 	for _, ln := range raw {
@@ -1338,7 +1368,7 @@ func runScrollTest() {
 		if wd := lipgloss.Width(s); wd != 1 {
 			fail("溢出：第 %d 行可见宽 = %d，期望 1", i, wd)
 		}
-		if hasBackgroundColor(s) {
+		if hasStrayBackground(s) {
 			fail("溢出：第 %d 行带背景色（透明度原则）", i)
 		}
 	}
@@ -1466,7 +1496,7 @@ func runScrollTest() {
 			fail("View(panel=%v)：行数=%v 拇指=%v 宽度≤%d=%v 右块锚定=%v",
 				panel, okRows, okBar, vm.width, okWidth, okAnchor)
 		}
-		if hasBackgroundColor(content) {
+		if hasStrayBackground(content) {
 			fail("View(panel=%v)：检测到背景色序列", panel)
 		}
 		fmt.Printf("  View(panel=%v)：行数 %d/%d ｜ 拇指 %v ｜ 宽度合规 %v ｜ 右块锚定 %v\n",

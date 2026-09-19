@@ -396,7 +396,7 @@ func runStatusTest() {
 			tag = "WIDTH!"
 			bad = true
 		}
-		if hasBackgroundColor(line) {
+		if hasStrayBackground(line) {
 			tag += " BG!"
 			bad = true
 		}

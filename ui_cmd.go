@@ -462,7 +462,7 @@ func runCmdTest() {
 			if lipgloss.Width(ln) > m.blockWidth() {
 				okW = false
 			}
-			if hasBackgroundColor(ln) {
+			if hasStrayBackground(ln) {
 				okBG = false
 			}
 			if strings.Contains(ln, "\u276F") && strings.Contains(ln, "38;2;78;224;94") {
@@ -612,7 +612,7 @@ func runCmdTest() {
 				break
 			}
 		}
-		if hasBackgroundColor(content) {
+		if hasStrayBackground(content) {
 			okW = false
 		}
 		check("View() 集成：行数不变 / 弹层可见 / 宽度合规 / 背景干净", okRows && okCmd && okW)

@@ -404,7 +404,7 @@ func runPermTest() {
 
 	bad := false
 	for _, ln := range raw {
-		if hasBackgroundColor(ln) {
+		if hasStrayBackground(ln) {
 			bad = true
 		}
 	}

@@ -40,10 +40,11 @@ type Theme struct {
 	ThoughtPre string // 思考前缀
 	ThoughtTtl string // 思考标题
 
-	// markdown 元素（M6 全量主题化：标题 / 链接 / 斜体）
+	// markdown 元素（M6 全量主题化：标题 / 链接 / 斜体 / 行内代码）
 	Heading string
 	Link    string
 	Emph    string
+	Code    string // 行内代码（低饱和柔色，防晃眼）
 
 	// 线框与容器
 	Rule        string // 细线（输入区框线、进度条空槽）
@@ -55,6 +56,7 @@ type Theme struct {
 	OK        string // 成功（工具柔绿）
 	Err       string // 失败（工具柔红）
 	ErrSoft   string // 错误块（柔红 + bold）
+	ErrBadge  string // 错误徽章 ERROR 的底色（低饱和红；全应用唯一一处铺底色，§0.5 例外）
 	Warn      string // 提醒（思考中 / 排队 / 需要批准）
 	Reply     string // 回复中
 	PromptOff string // 输入提示符（空输入）
@@ -71,12 +73,12 @@ type Theme struct {
 var sproutTheme = Theme{
 	Name: "sprout", Desc: "翠绿（默认）",
 
-	Text: "#D0D0D0", TextHi: "#E6E6E6", Faint: "#8F8F8F", Dim: "#6E6E6E", Strong: "#FFFFFF",
+	Text: "#D0D0D0", TextHi: "#E6E6E6", Faint: "#8F8F8F", Dim: "#6E6E6E", Strong: "#D9E7D7",
 	Tool: "#9A9A9A", ThoughtPre: "#8A8A8A", ThoughtTtl: "#B4B4B4",
 	Rule: "#3E5340", Placeholder: "#5A6A5A", Track: "#3A4A3C",
-	Accent: "#4EE05E", OK: "#8CE28A", Err: "#C97B7B", ErrSoft: "#D98A8A",
+	Accent: "#4EE05E", OK: "#8CE28A", Err: "#C97B7B", ErrSoft: "#D98A8A", ErrBadge: "#AC5A5E",
 	Warn: "#F5A25C", Reply: "#7CC8F8", PromptOff: "#4E5E4E", PromptOn: "#3FCF52",
-	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC",
+	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC", Code: "#8FBF9F",
 
 	GradA: "#C8F5A0", GradB: "#5FCC6E", GradC: "#2F7D46",
 }
@@ -88,12 +90,12 @@ var sproutTheme = Theme{
 var monoTheme = Theme{
 	Name: "mono", Desc: "灰度（界面无彩色）",
 
-	Text: "#D0D0D0", TextHi: "#F2F2F2", Faint: "#969696", Dim: "#6E6E6E", Strong: "#FFFFFF",
+	Text: "#D0D0D0", TextHi: "#F2F2F2", Faint: "#969696", Dim: "#6E6E6E", Strong: "#F0F0F0",
 	Tool: "#9A9A9A", ThoughtPre: "#8A8A8A", ThoughtTtl: "#B4B4B4",
 	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C",
-	Accent: "#E8E8E8", OK: "#C8C8C8", Err: "#A8A8A8", ErrSoft: "#D8D8D8",
+	Accent: "#E8E8E8", OK: "#C8C8C8", Err: "#A8A8A8", ErrSoft: "#D8D8D8", ErrBadge: "#8C8C8C",
 	Warn: "#DDDDDD", Reply: "#C4C4C4", PromptOff: "#4A4A4A", PromptOn: "#D0D0D0",
-	Heading: "#F2F2F2", Link: "#C4C4C4", Emph: "#B0B0B0",
+	Heading: "#F2F2F2", Link: "#C4C4C4", Emph: "#B0B0B0", Code: "#B0B0B0",
 
 	GradA: "#F0F0F0", GradB: "#C8C8C8", GradC: "#8C8C8C",
 }
@@ -156,6 +158,10 @@ func applyTheme(t Theme) {
 	toolOutStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Faint))
 	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Dim))
 	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.ErrSoft)).Bold(true)
+	// 错误徽章（2026-09-19 用户点菜，照 crush）：白字 + 低饱和红底小方块。
+	// 这是全应用唯一一处铺底色——§0.5 的透明度原则在此让位给错误的辨识度
+	// （徽章只 7 格，不是大块底色；mono 主题下退化为灰底）。
+	errBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color(t.ErrBadge)).Bold(true)
 
 	// 输入区 / 状态栏
 	ruleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Rule))
@@ -364,7 +370,7 @@ func runThemeTest() {
 	// ④ mono = 全灰探测器；sprout = 关键色齐备
 	applyTheme(monoTheme)
 	monoSample := themeSample()
-	monoClean := !hasNonGrayColor(monoSample) && !hasBackgroundColor(monoSample)
+	monoClean := !hasNonGrayColor(monoSample) && !hasStrayBackground(monoSample)
 
 	applyTheme(sproutTheme)
 	sproutSample := themeSample()
@@ -382,6 +388,30 @@ func runThemeTest() {
 	}
 	okMD := strings.Contains(mdOut, "38;2;239;247;234") && strings.Contains(mdOut, "38;2;124;200;248")
 	check("markdown：标题/链接使用主题色（sprout 实测）", okMD)
+
+	// ④c 防晃眼配色（2026-09-19 用户反馈"晃眼""加粗巨晃，白色晃""绿色也晃眼睛"）：
+	// 正文 = 主题 Text、粗体 = 柔白 Strong（charmtone Sash）、行内代码 = 低饱和
+	// Code；纯白 #FFFFFF 必须缺席（取证见规格 §15 ㊺）。
+	glareSrc := "普通段落，包含 **加粗** 与 `行内代码`。"
+	glareOut := ""
+	if out, ok := renderMarkdown(glareSrc, 60); ok {
+		glareOut = out
+	}
+	okGlareSprout := strings.Contains(glareOut, "38;2;208;208;208") && // 正文 Text #D0D0D0
+		strings.Contains(glareOut, "38;2;217;231;215") && // 粗体 Strong #D9E7D7
+		strings.Contains(glareOut, "38;2;143;191;159") && // 行内代码 Code #8FBF9F
+		!strings.Contains(glareOut, "38;2;255;255;255") // 纯白缺席
+	applyTheme(monoTheme)
+	glareMono := ""
+	if out, ok := renderMarkdown(glareSrc, 60); ok {
+		glareMono = out
+	}
+	okGlareMono := strings.Contains(glareMono, "38;2;240;240;240") && // 粗体 Strong #F0F0F0
+		strings.Contains(glareMono, "38;2;176;176;176") && // 行内代码 Code #B0B0B0
+		!strings.Contains(glareMono, "38;2;255;255;255")
+	applyTheme(sproutTheme)
+	check("防晃眼：sprout 正文/柔白粗体/柔绿代码在场且纯白缺席；mono 对应柔灰（粗体 #F0F0F0 / 代码 #B0B0B0）",
+		okGlareSprout && okGlareMono)
 
 	// ⑤ 渐变：10 格、端点 = A / C、50% 填充格 ≥3 种颜色（确实在渐变）
 	grad := contextBarGrad(10)

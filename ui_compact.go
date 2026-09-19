@@ -284,7 +284,7 @@ func runCompactTest() {
 		!strings.Contains(plain, "思考中") && !strings.Contains(plain, "回复中") &&
 		!strings.Contains(plain, "正在整理") &&
 		lipgloss.Width(strip[0]) <= mp.blockWidth()+2 &&
-		!hasBackgroundColor(strip[0]) &&
+		!hasStrayBackground(strip[0]) &&
 		barCells(110) == compactBarCells && barCells(80) == compactBarCells // 定长：不随宽度伸缩
 	check("工作区进度条：英文提示 + 定长条 + 百分比、无状态词/乱码/静点、只前景色", okBar)
 

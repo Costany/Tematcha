@@ -449,7 +449,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 与历史重放同一条 FIFO 通道，保证排在整段重放之后（见 methodLoadDone）。
 		if msg.ev.Method == methodLoadDone {
 			id, _ := msg.ev.Params["id"].(string)
-			return m.finishLoad(id, msg.ev.Err)
+			title, _ := msg.ev.Params["title"].(string)
+			return m.finishLoad(id, title, msg.ev.Err)
 		}
 		m.handleEvent(msg.ev)
 		return m, waitEvent(m.client)
@@ -473,7 +474,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 只有"没有引擎连接"的自检路径还走这里（loadSessionAsync 直接返回）。
 		// 正常载入的完成事件走事件通道（acpEventMsg → methodLoadDone → finishLoad），
 		// 保证排在整段历史重放之后。
-		return m.finishLoad(msg.id, msg.err)
+		return m.finishLoad(msg.id, msg.title, msg.err)
 
 	case acpClosedMsg:
 		if m.status != stEngineGone {
@@ -596,7 +597,7 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.feed.Append(kSys, "载入会话 "+row.ID+"（引擎将重放历史）")
 			m.resetUsage() // M5d：清用量快照，避免把换会话误判成压缩
 			m.syncLayout()
-			return m, loadSessionAsync(m.client, row.ID)
+			return m, loadSessionAsync(m.client, row.ID, row.Title)
 		default:
 			return m, nil
 		}
@@ -988,21 +989,31 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 		m.status = stDone
 	}
 	// 回合分隔行：◇ 模型 via 供应商 in 总耗时（从用户发送那刻算起）
+	//
+	// 2026-09-19 用户点菜：**出错时不落这一行**。出错的视觉主角是上面的 ERROR
+	// 徽章块，"哪个模型、多久才失败"是噪音（用户原话："也不要显示 XX模型 via
+	// xx in xxms"）。
 	dur := time.Duration(0)
 	if !m.turnStart.IsZero() {
 		dur = time.Since(m.turnStart)
 	}
-	m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
+	if msg.err == nil {
+		m.feed.Append(kTurn, turnSummaryLine(m.modelLabel, m.modelProvider, dur))
+	}
 
 	// M10/M11 收尾行（§11.6）：工作区闲时显示"上一回合怎么了"——常规收尾语按
 	// 时长分档 + 轮换序号递增；压缩回合随后覆盖成收据/未见下降/取消/失败。
+	//
+	// 2026-09-19 用户点菜：**出错时整行不显示**（原来会落"半路卡壳 · 10ms"）。
+	// 出错的信息量全在 ERROR 块里，工作区留空即不占行（closeLine == ""）。
 	m.closeLine = closingLine(m.status, dur, m.turnSeq)
 	m.closeKind = closePlain
 	switch m.status {
 	case stCancelled:
 		m.closeKind = closeWarn
 	case stError:
-		m.closeKind = closeErr
+		// 错误：既不要"半路卡壳"，也不要时长——工作区直接留空。
+		m.closeLine, m.closeKind = "", closeErr
 	}
 	m.turnSeq++
 
@@ -1043,7 +1054,7 @@ func (m model) forceCancelFinish() (tea.Model, tea.Cmd) {
 // 翻假，后面的 agent_message_chunk 全走 lastAssistant 合并路径，回答并进第一条
 // 助手消息（位置很高，翻页才看得见），用户看到"只剩三条提问"。现在完成事件由
 // loadSessionAsync 注入事件通道，与重放同一条 FIFO，天然排在最后。
-func (m model) finishLoad(id string, err error) (tea.Model, tea.Cmd) {
+func (m model) finishLoad(id, title string, err error) (tea.Model, tea.Cmd) {
 	m.loading = false
 	m.busy = false
 	if err != nil {
@@ -1051,6 +1062,13 @@ func (m model) finishLoad(id string, err error) (tea.Model, tea.Cmd) {
 		m.feed.Append(kError, "载入会话失败："+err.Error())
 	} else {
 		m.sessionID = id
+		// 会话标题：session/load 的应答里没有它，而引擎的 session_info_update
+		// 只在会话被命名/改名时才发（letcode projection.rs 的
+		// SessionTitleUpdated 分支）——所以标题只能从会话列表那一行带过来
+		// （2026-09-19 用户截图：/resume 回来右栏显示「未命名」）。
+		if title != "" {
+			m.sessTitle = title
+		}
 		m.status = stDone
 		m.feed.Append(kSys, "已载入会话 "+id)
 	}
