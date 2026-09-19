@@ -398,14 +398,23 @@ func runTodosTest() {
 	content := vm.View().Content
 	vlines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	okRows := len(vlines) == vm.height
-	okTop := len(vlines) > 1 && strings.Contains(stripANSI(vlines[1]), "# Todos")
+	// 钉面板钉在消息区底部（2026-09-19 搬家：顶部 → 底部，照 Claude Code）：
+	// 标题行紧跟在消息行之后（索引 = 顶部留白 1 行 + feed 高），之后还有输入区/状态栏
+	hdr := -1
+	for i, ln := range vlines {
+		if strings.Contains(stripANSI(ln), "# Todos") {
+			hdr = i
+			break
+		}
+	}
+	okBottom := hdr == 1+vm.feed.height && hdr+pinnedH <= len(vlines)
 	okW2 := true
 	for _, ln := range vlines {
 		if lipgloss.Width(ln) > vm.width {
 			okW2 = false
 		}
 	}
-	check("View 集成：行数不变 / 钉面板在消息区顶部 / 宽度合规", okRows && okTop && okW2)
+	check("View 集成：行数不变 / 钉面板在消息区底部（Claude Code 式）/ 宽度合规", okRows && okBottom && okW2)
 
 	if failed {
 		fmt.Println("todostest: 有失败项")

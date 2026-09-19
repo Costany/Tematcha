@@ -16,7 +16,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -136,21 +138,40 @@ func (m *model) answerPerm(kind string) {
 	m.settlePerm(p, verb, clipWidth(opt.Name, 48))
 }
 
+// permCancelledOutcome 取消权限请求时的协议应答体（双重嵌套 outcome，见文件头注）。
+// 抽成函数是为了自检能断言形状——2026-09-19 卡死事故的教训：这个应答漏发，
+// 引擎的请求永远挂着，回合永不结束，界面钉死"取消中"。
+func permCancelledOutcome() map[string]any {
+	return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
+}
+
 // cancelPerms 取消全部待审批：先取消回合（若在回合中），再逐条回 cancelled。
-// 协议要求：客户端取消回合时，所有挂起的权限请求都必须以 cancelled 应答。
+// 协议要求：客户端取消回合时，所有挂起的权限请求都必须以 cancelled 应答——
+// 漏了这一步引擎会一直等下去，回合卡死（真机事故 2026-09-19：界面钉在
+// "取消中"、排队消息也发不出去）。先回协议再收 UI。
 func (m *model) cancelPerms() {
 	if m.perm == nil && len(m.permQueue) == 0 {
 		return
 	}
 	if m.busy {
-		m.client.CancelTurn(m.sessionID)
+		if m.client != nil {
+			m.client.CancelTurn(m.sessionID)
+		}
 		m.status = stCancelling
+		m.cancelAt = time.Now() // 取消看门狗起点（main.go：超时强制收尾）
+	}
+	// 逐条回 cancelled（当前请求 + 排队）；client 为 nil 的自检环境只收 UI。
+	answer := func(p *PermRequest) {
+		if m.client != nil && p.RPCID != nil {
+			_ = m.client.Respond(p.RPCID, permCancelledOutcome())
+		}
+		m.settlePermCancelled(p)
 	}
 	if m.perm != nil {
-		m.settlePermCancelled(m.perm)
+		answer(m.perm)
 	}
 	for _, p := range m.permQueue {
-		m.settlePermCancelled(p)
+		answer(p)
 	}
 	m.perm, m.permQueue = nil, nil
 	m.syncLayout()
@@ -393,4 +414,66 @@ func runPermTest() {
 	} else {
 		fmt.Println("OK 背景色检查：未检测到背景色序列")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// -canceltest：取消不卡死自检（2026-09-19 真机卡死事故的回归网）
+// ---------------------------------------------------------------------------
+
+// runCancelTest 断言"取消权限审批不会把回合钉死"的整条链路：
+//   - permCancelledOutcome 的协议形状（双重嵌套 outcome=cancelled）
+//   - cancelPerms：当前请求 + 队列全部清空、占位换暗色文案、状态置取消中、
+//     看门狗起点落账；nil client 护栏（自检环境不发协议也不 panic）
+//   - 看门狗 gen 守卫：强制收尾后引擎迟到的旧回合结果被丢弃；gen=0 自构消息放行
+//   - forceCancelFinish：强制收尾 + 作废在途结果 + 取消超时文案
+func runCancelTest() {
+	failed := false
+	check := func(name string, cond bool) {
+		tag := "PASS"
+		if !cond {
+			tag = "FAIL"
+			failed = true
+		}
+		fmt.Printf("[%s] %s\n", tag, name)
+	}
+
+	// ① cancelled 应答体形状（漏发它 = 引擎请求永远挂着 = 回合卡死）
+	oc := permCancelledOutcome()
+	inner, _ := oc["outcome"].(map[string]any)
+	check("应答体：双重嵌套 outcome=cancelled", inner != nil && inner["outcome"] == "cancelled")
+
+	// ② cancelPerms 状态机（nil client：只验状态流转，不发协议）
+	m := model{width: 100, feed: NewFeed(), status: stThinking, busy: true}
+	p1 := &PermRequest{RPCID: 1, Title: "shell__exec git branch -a"}
+	m.pushPerm(p1)
+	m.pushPerm(&PermRequest{RPCID: 2, Title: "shell__exec ls"})
+	m.cancelPerms()
+	check("cancelPerms：当前请求与队列全部清空", m.perm == nil && len(m.permQueue) == 0)
+	check("cancelPerms：状态置取消中 + 看门狗起点落账",
+		m.status == stCancelling && !m.cancelAt.IsZero())
+	check("cancelPerms：占位换成暗色「已取消审批」",
+		p1.Placeholder != nil && strings.Contains(p1.Placeholder.Text, "已取消审批"))
+
+	// ③ gen 守卫：迟到的旧回合结果丢弃；gen=0（自检自构）放行
+	m2 := model{width: 100, feed: NewFeed(), busy: true, turnGen: 5}
+	nm, _ := m2.handleTurnDone(turnDoneMsg{reason: "end_turn", gen: 4})
+	check("gen 守卫：迟到的旧回合结果被丢弃（busy 不变）", nm.(model).busy)
+	m3 := model{width: 100, feed: NewFeed(), busy: true, turnGen: 5}
+	nm3, _ := m3.handleTurnDone(turnDoneMsg{reason: "end_turn"})
+	check("gen 守卫：gen=0 自构消息照常收尾", !nm3.(model).busy)
+
+	// ④ 强制收尾：作废在途结果 + 超时文案 + 状态落 cancelled
+	m4 := model{width: 100, feed: NewFeed(), busy: true, turnGen: 2, status: stCancelling}
+	nm4, _ := m4.forceCancelFinish()
+	got := nm4.(model)
+	check("forceCancelFinish：收尾并作废在途结果（turnGen+1、status=cancelled、看门狗撤防）",
+		!got.busy && got.turnGen == 3 && got.status == stCancelled && got.cancelAt.IsZero())
+	nm5, _ := got.handleTurnDone(turnDoneMsg{reason: "end_turn", gen: 2})
+	check("作废后：引擎迟到的旧结果仍被丢弃（不会二次收尾）", nm5.(model).status == stCancelled)
+
+	if failed {
+		fmt.Println("canceltest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("canceltest: 全部通过")
 }

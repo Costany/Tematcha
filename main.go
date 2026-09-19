@@ -47,6 +47,11 @@ const (
 	stLoading    = "loading"
 )
 
+// cancelGrace 取消看门狗的宽限期：发起 session/cancel 后引擎这么久还没结束
+// 回合，就强制本地收尾。2026-09-19 真机事故：挂起的权限请求没被应答时引擎
+// 永远不回回合结束，界面钉死"取消中"——正常取消引擎秒回，根本用不到它。
+const cancelGrace = 15 * time.Second
+
 // ---------------------------------------------------------------------------
 // tea.Msg 类型
 // ---------------------------------------------------------------------------
@@ -58,12 +63,18 @@ type acpClosedMsg struct{}
 type turnDoneMsg struct {
 	reason string
 	err    error
+	// gen = 回合发起时的回合计代（beginTurn 递增）。看门狗强制收尾后，引擎
+	// 迟到的旧回合结果靠它识别并丢弃；0 = 自检/内部自构消息，不参与校验。
+	gen int
+	// forced = 取消看门狗触发的强制收尾（引擎超时未响应取消），文案不同。
+	forced bool
 }
 
 // turnResult 是 prompt 回合的最终结果（从 goroutine 传回）。
 type turnResult struct {
 	reason string
 	err    error
+	gen    int
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +262,14 @@ type model struct {
 	busy   bool
 	status string
 
+	// 取消看门狗（2026-09-19 卡死事故）：cancelAt = 发起 session/cancel 的时刻
+	// （零值 = 没在取消）；超过 cancelGrace 引擎还不结束回合就强制本地收尾，
+	// 否则界面会永久钉在"取消中"、排队消息也发不出去。turnGen = 回合计代：
+	// beginTurn 递增；强制收尾会再 +1 作废在途结果，引擎迟到的旧回合结果
+	// （gen 过期）一律丢弃，不会误杀新回合。
+	cancelAt time.Time
+	turnGen  int
+
 	// 回合计时与模型信息（回合分隔行用）：turnStart = 用户发送时刻；
 	// modelLabel/modelProvider 从 session/new 的 configOptions 解析
 	//（如 Step 3.7 Flash / guji），之后由 config_option_update 保持同步。
@@ -396,6 +415,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.blinkN++
 		m.stepBarAnim()     // M5d：压缩后的上下文条缓动（心跳驱动）
 		m.stepCompactProg() // M11：压缩进度条推进（按已用时长重算）
+		// 取消看门狗（2026-09-19 卡死事故）：发了 session/cancel 引擎却迟迟不结束
+		// 回合（挂起的反向请求没被应答就会这样）——超时强制本地收尾，别把界面永久
+		// 钉在"取消中"（排队消息也发不出去）。正常取消引擎秒回，根本不会触发。
+		if m.busy && !m.cancelAt.IsZero() && time.Since(m.cancelAt) > cancelGrace {
+			return m.forceCancelFinish()
+		}
 		if m.active != nil {
 			m.active.CursorOn = m.blinkOn
 		}
@@ -650,8 +675,11 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if cancel {
 		if m.busy {
-			m.client.CancelTurn(m.sessionID)
+			if m.client != nil {
+				m.client.CancelTurn(m.sessionID)
+			}
 			m.status = stCancelling
+			m.cancelAt = time.Now() // 取消看门狗起点（超时强制收尾，见 blinkMsg）
 		} else {
 			m.input.Clear()
 			m.histOn = false // M4c：清空输入 = 退出历史浏览
@@ -688,7 +716,10 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 	// M6：命令弹层鼠标点选（点某一行 = 选中并执行；带参数命令先补全）。
 	if m.palOpen() {
-		palTop := 1 + len(m.renderTodosPinned(m.feed.width)) + m.feed.normH() + 1 + len(m.renderPermPanel(m.width))
+		// 弹层首行的屏幕行号：顶部留白 + 消息块（钉面板+消息行，总高不变）+ 空行
+		// + 权限面板 + 追问面板（2026-09-19 补算：此前漏了追问面板高度）
+		palTop := 1 + len(m.renderTodosPinned(m.feed.width)) + m.feed.normH() + 1 +
+			len(m.renderPermPanel(m.width)) + len(m.renderElicitPanel(m.width))
 		if msg.Y >= palTop {
 			if ci, ok := m.palRowAt(msg.Y - palTop); ok {
 				c := m.cmds[ci]
@@ -701,8 +732,9 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	// View 布局：第 0 行是顶部留白，接着是钉面板（M5b），之后才是消息区窗口
-	target := m.feed.ItemAt(msg.Y - 1 - len(m.renderTodosPinned(m.feed.width)))
+	// View 布局：第 0 行是顶部留白，之后就是消息区窗口（钉面板 M5b 在消息区
+	// 底部，不占消息行偏移——2026-09-19 搬家后点击命中不再减钉面板高度）
+	target := m.feed.ItemAt(msg.Y - 1)
 
 	// 工具卡：展开/收起（没有可展开内容时不响应，免得误置 UserSet）。
 	if target != nil && target.Kind == kTool {
@@ -733,12 +765,13 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleRightClick 鼠标右键点击消息区：复制该条消息到系统剪贴板（M6）。
-// 命中口径与左键一致（右栏区域忽略；行号先扣顶部留白与钉面板）。
+// 命中口径与左键一致（右栏区域忽略；行号只扣顶部留白——钉面板 M5b 现位于
+// 消息区底部，不再占消息行偏移）。
 func (m model) handleRightClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if m.panelVisible() && msg.X >= m.feed.width+scrollBarW+panelSepW {
 		return m, nil
 	}
-	target := m.feed.ItemAt(msg.Y - 1 - len(m.renderTodosPinned(m.feed.width)))
+	target := m.feed.ItemAt(msg.Y - 1)
 	if target == nil {
 		return m, nil
 	}
@@ -850,6 +883,8 @@ func (m model) beginTurn(text string) (model, tea.Cmd) {
 	m.busy = true
 	m.status = stThinking
 	m.turnStart = time.Now()
+	m.turnGen++                       // 新回合计代（看门狗丢弃旧结果的依据）
+	m.cancelAt = time.Time{}          // 新回合：取消看门狗撤防
 	m.turnChars = 0                   // M10：本回合吐回字符数清零（≈↓token 估算的基数）
 	m.compactReq = isCompactCmd(text) // M5d：压缩回合（M11 起在输入栏上方的工作区显示进度条）
 	if m.compactReq {
@@ -868,10 +903,10 @@ func (m model) beginTurn(text string) (model, tea.Cmd) {
 		return m, nil
 	}
 	ch := make(chan turnResult, 1)
-	client, sid := m.client, m.sessionID
+	client, sid, gen := m.client, m.sessionID, m.turnGen
 	go func() {
 		reason, err := client.Prompt(sid, text)
-		ch <- turnResult{reason: reason, err: err}
+		ch <- turnResult{reason: reason, err: err, gen: gen}
 	}()
 	return m, waitTurn(ch)
 }
@@ -895,7 +930,12 @@ func (m *model) dequeueNext() (string, bool) {
 
 // handleTurnDone 回合结束：熄光标、定格思考计时、记状态、落回合分隔行。
 func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != 0 && msg.gen != m.turnGen {
+		// 看门狗强制收尾后引擎迟到的旧回合结果：丢弃（新回合可能已经在跑）
+		return m, nil
+	}
 	m.busy = false
+	m.cancelAt = time.Time{} // 回合结束：取消看门狗撤防
 	m.clearCursor()
 	m.endThoughtCycle()
 	m.endAssistantSegment() // 回合收束：最后一段正文到此为止
@@ -907,7 +947,11 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 		it.Detail = engineErrorHint(msg.err.Error())
 		m.status = stError
 	case msg.reason == "cancelled":
-		m.feed.Append(kSys, "回合已取消")
+		if msg.forced {
+			m.feed.Append(kSys, fmt.Sprintf("取消超时 · 引擎 %v 内未结束回合，已强制收尾（如仍有残留输出请忽略）", cancelGrace))
+		} else {
+			m.feed.Append(kSys, "回合已取消")
+		}
 		m.status = stCancelled
 	default:
 		m.status = stDone
@@ -952,6 +996,13 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 		return m.beginTurn(text)
 	}
 	return m, nil
+}
+
+// forceCancelFinish 取消看门狗的强制收尾：作废当前回合计代（引擎之后迟到的
+// 结果一律丢弃），再按"已取消"走正常收尾流程（forced 文案 + 队列衔接）。
+func (m model) forceCancelFinish() (tea.Model, tea.Cmd) {
+	m.turnGen++
+	return m.handleTurnDone(turnDoneMsg{reason: "cancelled", forced: true})
 }
 
 // engineErrorHint 给引擎错误配一句"怎么办"（kError 的 Detail 行，渲染成暗色提示）。
@@ -1512,11 +1563,13 @@ func (m model) View() tea.View {
 	// 右栏（§4/§5）显示时：消息区每行右侧拼「  │ 」+ 右栏对应行
 	feedLines := m.feed.Render()
 	bar := m.feed.Scrollbar() // M4a：右缘滚动条列（空串 = 该行不画）
-	// M5b：钉面板（# Todos）占消息区最上面几行，不参与滚动（高度已在 syncLayout 扣出）
+	// M5b：钉面板（# Todos）钉在消息区最下方（2026-09-19 用户点菜：从顶部搬到
+	// 底部，照 Claude Code——待办紧贴最新消息之下、输入区之上），不参与滚动
+	// （高度已在 syncLayout 扣出）
 	pinned := m.renderTodosPinned(m.feed.width)
 	left := make([]string, 0, len(pinned)+len(feedLines))
-	left = append(left, pinned...)
 	left = append(left, feedLines...)
+	left = append(left, pinned...)
 	var panelLines []string
 	if m.panelVisible() {
 		panelLines = m.renderPanel(len(left))
@@ -1528,8 +1581,9 @@ func (m model) View() tea.View {
 			ln = clipLine(ln, m.feed.width)
 		}
 		b := ""
-		if j := i - len(pinned); j >= 0 && j < len(bar) {
-			b = bar[j]
+		// 钉面板在底部后消息行在前：滚动条只跟消息行对齐（钉面板行不画条）
+		if i < len(bar) {
+			b = bar[i]
 		}
 		// 该行要画条（或右栏在那儿等着）时才补空格对齐：滚动条钉在消息区右缘
 		if b != "" || panelLines != nil {
@@ -1635,7 +1689,8 @@ func waitEvent(c *ACPClient) tea.Cmd {
 // waitTurn 等一个 prompt 回合结束（goroutine 里的 Call 返回后传回）。
 func waitTurn(ch chan turnResult) tea.Cmd {
 	return func() tea.Msg {
-		return turnDoneMsg(<-ch)
+		r := <-ch
+		return turnDoneMsg{reason: r.reason, err: r.err, gen: r.gen}
 	}
 }
 
@@ -1668,6 +1723,7 @@ func main() {
 	compactTest := flag.Bool("compacttest", false, "压缩进度自检（/compact 识别/工作区进度条/填充语义/完成跳 100%/三态收尾）")
 	workTest := flag.Bool("worktest", false, "灵动工作行自检（乱码块/拼装/收尾语/工作区集成）")
 	agentTest := flag.Bool("agenttest", false, "子代理增强自检（识别/信封/chips/工具卡/来源徽章）")
+	cancelTest := flag.Bool("canceltest", false, "取消不卡死自检（cancelled 应答体/cancelPerms 状态机/看门狗 gen 守卫/强制收尾）")
 	sessions := flag.Bool("sessions", false, "真拉一次 session/list 并打印（无 TTY 探针）")
 	loadID := flag.String("load", "", "真载入一条会话并统计重放（无 TTY 探针；值为 sessionId）")
 	trace := flag.Bool("trace", false, "把 ACP 原始流量落盘到 acp-trace.log（排障用）")
@@ -1771,6 +1827,11 @@ func main() {
 
 	if *agentTest {
 		runAgentTest()
+		return
+	}
+
+	if *cancelTest {
+		runCancelTest()
 		return
 	}
 	if *copyTest {
