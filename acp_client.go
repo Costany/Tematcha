@@ -41,6 +41,9 @@ type ACPEvent struct {
 	// 引擎就会一直等（表现为"回合卡死、CPU 为 0"）。通知为 nil。
 	RawID  any
 	Params map[string]any // 解析后的参数（可能为 nil）
+	// Err 只给**合成事件**用（Method == methodLoadDone）：它不是引擎发的，
+	// 没有 JSON 可解析，错误只能单独带一个字段。引擎事件一律走 Params。
+	Err error
 }
 
 // ACPClient 是 letcode acp 子进程的薄封装。

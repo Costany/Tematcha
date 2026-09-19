@@ -99,13 +99,25 @@ func fetchSessions(c *ACPClient) tea.Cmd {
 }
 
 // loadSessionAsync 载入一条会话（引擎先重放历史，再回应答）。
+//
+// 完成事件**必须**塞回 c.Events，不能直接当 tea.Msg 返回：读循环是先把整段
+// 历史重放一条条推进 c.Events、然后才把应答交给等的 Call()——而 UI 是一个 tea
+// 周期才消费一条事件。直接返回的话，完成事件会插到重放中间（2026-09-19 真机
+// 事故：/resume 后只剩三条提问，回答全不见了），把 loading/busy 提前翻假，
+// 后面的 agent chunk 就走 lastAssistant 合并路径。塞回同一条 FIFO 通道即与
+// 重放严格保序。
 func loadSessionAsync(c *ACPClient, id string) tea.Cmd {
 	return func() tea.Msg {
 		if c == nil {
 			return sessLoadDoneMsg{id: id, err: fmt.Errorf("没有可用的引擎连接")}
 		}
 		_, err := c.LoadSession(id, workspace)
-		return sessLoadDoneMsg{id: id, err: err}
+		c.Events <- ACPEvent{
+			Method: methodLoadDone,
+			Params: map[string]any{"id": id},
+			Err:    err,
+		}
+		return noopMsg{}
 	}
 }
 
@@ -301,4 +313,160 @@ func runSessTest() {
 		os.Exit(1)
 	}
 	fmt.Println("sesstest: 全部通过")
+}
+
+// ---------------------------------------------------------------------------
+// -loadtest：会话载入（session/load 历史重放）自检
+// ---------------------------------------------------------------------------
+
+// runLoadTest 覆盖 2026-09-19 真机事故的整条链路：/resume 之后只剩三条提问、
+// 回答全不见了。根因是"载入完成"事件被当成普通 tea.Msg 从 goroutine 返回，插到
+// 历史重放中间——loading/busy 被提前翻假，后面的 agent_message_chunk 全走
+// lastAssistant 合并路径，回答并进第一条助手消息（位置很高，翻页才看得见）。
+//
+// 修法两件事，这里各有关键断言：
+//
+//	① 完成事件改走事件通道（loadSessionAsync 注入 c.Events），与重放同一条 FIFO；
+//	② 合并路径加 loading 护栏（载入重放期间绝不合并）。
+func runLoadTest() {
+	failed := false
+	check := func(name string, cond bool) {
+		tag := "PASS"
+		if !cond {
+			tag = "FAIL"
+			failed = true
+		}
+		fmt.Printf("[%s] %s\n", tag, name)
+	}
+
+	// newLoading 复现"会话列表按下 enter"之后的状态：新 feed + 载入中 + 禁发。
+	newLoading := func() *model {
+		m := &model{width: 100, feed: NewFeed(), status: stLoading, loading: true, busy: true}
+		m.feed.SetSize(94, 20)
+		m.feed.Append(kSys, "载入会话 1789816533057-27968-0（引擎将重放历史）")
+		return m
+	}
+	// replay 模拟引擎重放来的一条 session/update。
+	replay := func(m *model, kind, text string) {
+		m.handleSessionUpdate(map[string]any{
+			"update": map[string]any{
+				"sessionUpdate": kind,
+				"content":       map[string]any{"text": text},
+			},
+		})
+	}
+	kinds := func(m *model) []int {
+		out := make([]int, 0, m.feed.Len())
+		for _, it := range m.feed.items {
+			out = append(out, it.Kind)
+		}
+		return out
+	}
+	countKind := func(m *model, k int) int {
+		n := 0
+		for _, it := range m.feed.items {
+			if it.Kind == k {
+				n++
+			}
+		}
+		return n
+	}
+	// drain 按 UI 的真实消费顺序处理事件通道：遇到 methodLoadDone 走 finishLoad，
+	// 其余走 handleEvent（也就是 Update 里 acpEventMsg 分支做的事）。
+	drain := func(m *model, c *ACPClient) *model {
+		for {
+			select {
+			case ev := <-c.Events:
+				if ev.Method == methodLoadDone {
+					id, _ := ev.Params["id"].(string)
+					nm, _ := m.finishLoad(id, ev.Err)
+					mv := nm.(model)
+					m = &mv
+					continue
+				}
+				m.handleEvent(ev)
+			default:
+				return m
+			}
+		}
+	}
+
+	// ① 重放保序 + 完成落最后：三条提问、三条回答，各自成条、顺序不变
+	c := &ACPClient{Events: make(chan ACPEvent, 16), Closed: make(chan struct{})}
+	for _, ev := range []ACPEvent{
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"text": "问一"}}}},
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "答一"}}}},
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"text": "问二"}}}},
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "答二"}}}},
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"text": "问三"}}}},
+		{Method: "session/update", Params: map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"text": "答三"}}}},
+		{Method: methodLoadDone, Params: map[string]any{"id": "1789816533057-27968-0"}},
+	} {
+		c.Events <- ev
+	}
+	m := drain(newLoading(), c)
+	check("重放保序：user/agent 交替各自成条（3 问 3 答，不是 3 问 1 答）",
+		countKind(m, kUser) == 3 && countKind(m, kAssistant) == 3)
+	check("条目顺序：sys → 问 → 答 → 问 → 答 → 问 → 答 → sys",
+		fmt.Sprint(kinds(m)) == fmt.Sprint([]int{kSys, kUser, kAssistant, kUser, kAssistant, kUser, kAssistant, kSys}))
+	last := m.feed.items[m.feed.Len()-1]
+	check("完成事件落在最后：末条是「已载入会话」回执",
+		last.Kind == kSys && strings.Contains(last.Text, "已载入会话 1789816533057-27968-0"))
+	check("收尾状态：loading/busy 释放、status=done、会话 id 落账",
+		!m.loading && !m.busy && m.status == stDone && m.sessionID == "1789816533057-27968-0")
+
+	// ② 护栏：loading 期间即便 busy 已假、lastAssistant 非空，也不合并
+	g := newLoading()
+	replay(g, "user_message_chunk", "问一")
+	replay(g, "agent_message_chunk", "答一")
+	g.busy = false // 模拟"完成事件提前插进来"把 busy 翻假的最坏情况
+	g.lastAssistant = g.feed.items[2]
+	replay(g, "user_message_chunk", "问二")
+	replay(g, "agent_message_chunk", "答二")
+	check("护栏：loading 中 agent chunk 不并入上一段（仍各自成条）",
+		countKind(g, kAssistant) == 2 && g.feed.items[3].Kind == kUser &&
+			g.feed.items[4].Kind == kAssistant && g.feed.items[4].Text == "答二")
+
+	// ③ 状态栏/光标：载入中不抢"回复中"、不挂光标
+	s := newLoading()
+	replay(s, "agent_message_chunk", "答一")
+	check("载入中：状态栏停在 loading、不挂流式光标",
+		s.status == stLoading && s.active == nil)
+
+	// ④ 思考块同理（先结束上一个思考周期，让 lastThought 就位）
+	t := newLoading()
+	replay(t, "agent_thought_chunk", "想一")
+	t.endThoughtCycle() // 周期结束：lastThought = 第一块、curThought = nil
+	t.busy = false      // 模拟"完成事件提前插进来"把 busy 翻假的最坏情况
+	replay(t, "agent_thought_chunk", "想二")
+	check("护栏：loading 中思考 chunk 也不合并（两块思考）",
+		countKind(t, kThought) == 2 && t.feed.items[2].Text == "想二")
+
+	// ⑤ 失败路径：finishLoad 带 err → 错误行 + status=error，且不落"已载入"
+	e := newLoading()
+	ev, _ := e.finishLoad("x", fmt.Errorf("引擎内部错误：session transcript is already open for writing"))
+	em := ev.(model)
+	check("失败路径：落错误行、status=error、不谎报已载入",
+		em.status == stError && countKind(&em, kError) == 1 &&
+			strings.Contains(em.feed.items[em.feed.Len()-1].Text, "载入会话失败"))
+
+	// ⑥ 用户消息在重放里照收（loading 期间不吃 localEcho 去重）
+	d := newLoading()
+	d.localEcho = "问一" // 刻意留一条会撞上的本地回显
+	replay(d, "user_message_chunk", "问一")
+	check("重放收录：loading 期间用户消息照收（本地回显去重让路）",
+		countKind(d, kUser) == 1 && d.feed.items[1].Text == "问一")
+
+	fmt.Println("== 载入重放后的消息区样张（宽 94）==")
+	for _, it := range m.feed.items {
+		for _, ln := range renderItem(it, 94) {
+			fmt.Printf("  %s\n", stripANSI(ln))
+		}
+	}
+
+	if failed {
+		fmt.Println("loadtest: 有失败项")
+		os.Exit(1)
+	}
+	fmt.Println("loadtest: 全部通过")
 }

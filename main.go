@@ -60,6 +60,16 @@ type blinkMsg struct{}
 type acpEventMsg struct{ ev ACPEvent }
 type acpClosedMsg struct{}
 
+// noopMsg 空消息：loadSessionAsync 已把"载入完成"注入事件通道，UI 无需再做动作。
+type noopMsg struct{}
+
+// methodLoadDone 是 session/load 完成事件的**合成**方法名——它不是引擎发的，
+// 是 loadSessionAsync 在自己的 goroutine 里塞进 c.Events 的。之所以要走事件
+// 通道而不是直接当 tea.Msg 返回：读循环先把整段历史重放推进 c.Events、然后才
+// 回应答，而 UI 是一个 tea 周期才消费一条事件——直接返回会让完成事件插到重放
+// 中间（2026-09-19 真机事故：/resume 后只剩三条提问，回答全不见了）。
+const methodLoadDone = "session/load_done"
+
 type turnDoneMsg struct {
 	reason string
 	err    error
@@ -427,6 +437,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, blinkAfter(m.blinkInterval()) // 续杯：心跳链永远只有这一根
 
 	case acpEventMsg:
+		// session/load 的完成事件是 loadSessionAsync 注入事件通道的合成事件：
+		// 与历史重放同一条 FIFO 通道，保证排在整段重放之后（见 methodLoadDone）。
+		if msg.ev.Method == methodLoadDone {
+			id, _ := msg.ev.Params["id"].(string)
+			return m.finishLoad(id, msg.ev.Err)
+		}
 		m.handleEvent(msg.ev)
 		return m, waitEvent(m.client)
 
@@ -446,18 +462,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessLoadDoneMsg:
-		m.loading = false
-		m.busy = false
-		if msg.err != nil {
-			m.status = stError
-			m.feed.Append(kError, "载入会话失败："+msg.err.Error())
-		} else {
-			m.sessionID = msg.id
-			m.status = stDone
-			m.feed.Append(kSys, "已载入会话 "+msg.id)
-		}
-		m.syncLayout()
-		return m, nil
+		// 只有"没有引擎连接"的自检路径还走这里（loadSessionAsync 直接返回）。
+		// 正常载入的完成事件走事件通道（acpEventMsg → methodLoadDone → finishLoad），
+		// 保证排在整段历史重放之后。
+		return m.finishLoad(msg.id, msg.err)
 
 	case acpClosedMsg:
 		if m.status != stEngineGone {
@@ -1005,6 +1013,28 @@ func (m model) forceCancelFinish() (tea.Model, tea.Cmd) {
 	return m.handleTurnDone(turnDoneMsg{reason: "cancelled", forced: true})
 }
 
+// finishLoad session/load 收尾：释放载入锁（loading/busy）、落"已载入会话"回执。
+//
+// 调用时机有讲究：必须等整段历史重放都进屏之后。2026-09-19 真机事故里它被
+// 当成普通 tea.Msg 从 goroutine 返回，结果插到重放中间——loading/busy 被提前
+// 翻假，后面的 agent_message_chunk 全走 lastAssistant 合并路径，回答并进第一条
+// 助手消息（位置很高，翻页才看得见），用户看到"只剩三条提问"。现在完成事件由
+// loadSessionAsync 注入事件通道，与重放同一条 FIFO，天然排在最后。
+func (m model) finishLoad(id string, err error) (tea.Model, tea.Cmd) {
+	m.loading = false
+	m.busy = false
+	if err != nil {
+		m.status = stError
+		m.feed.Append(kError, "载入会话失败："+err.Error())
+	} else {
+		m.sessionID = id
+		m.status = stDone
+		m.feed.Append(kSys, "已载入会话 "+id)
+	}
+	m.syncLayout()
+	return m, waitEvent(m.client)
+}
+
 // engineErrorHint 给引擎错误配一句"怎么办"（kError 的 Detail 行，渲染成暗色提示）。
 // 覆盖实测见过的三类：命令用法没写全、本地专有命令、会话设置被拒（推理档位等）。
 func engineErrorHint(s string) string {
@@ -1082,7 +1112,10 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 		m.endThoughtCycle() // 回答开始 = 上一段思考周期结束（定格其耗时）
 		if text := chunkText(upd); text != "" {
 			m.turnChars += utf8.RuneCountInString(text) // M10：工作行的 ≈↓token
-			if it := m.lastAssistant; !m.busy && it != nil {
+			// 迟到 chunk 并回上一段：只适用于"回合已结束"的竞态。loading（会话
+			// 重放）期间绝不走这条——每条助手消息都必须是独立条目，否则全部回答
+			// 会并进第一条助手消息、被顶到消息区上方看不见（2026-09-19 事故）。
+			if it := m.lastAssistant; !m.busy && !m.loading && it != nil {
 				// 回合已结束但事件才排到（应答通道先到）：并回上一段正文，
 				// 保证"完整正文在分隔行上方"（见 lastAssistant 字段注释）。
 				m.feed.AppendStr(it, text)
@@ -1090,8 +1123,9 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 				it := m.ensureAssistant() // 当前回答段落（跨段时新起一条，见 endAssistantSegment）
 				m.feed.AppendStr(it, text)
 				// 只在回合内更新状态/光标：终态之后迟到的 chunk 只补文本，
-				// 不能把状态栏改回"回复中"（否则会卡住不回"回合结束"）
-				if m.busy {
+				// 不能把状态栏改回"回复中"（否则会卡住不回"回合结束"）；
+				// 载入重放同理——状态栏该停在"载入中"。
+				if m.busy && !m.loading {
 					m.setActive(it)
 					m.status = stReplying
 				}
@@ -1101,13 +1135,14 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 		m.endAssistantSegment() // 推理开始 = 上一段正文结束
 		if text := chunkText(upd); text != "" {
 			m.turnChars += utf8.RuneCountInString(text) // M10：思考也算产出（≈↓token）
-			if it := m.lastThought; !m.busy && it != nil {
+			// 同 agent_message_chunk：loading（重放）期间不走合并路径
+			if it := m.lastThought; !m.busy && !m.loading && it != nil {
 				// 同上：迟到的思考 chunk 并回上一段思考块
 				m.feed.AppendStr(it, text)
 			} else {
 				it := m.ensureThought()
 				m.feed.AppendStr(it, text)
-				if m.busy {
+				if m.busy && !m.loading {
 					m.setActive(it)
 					m.status = stThinking
 				}
@@ -1715,6 +1750,7 @@ func main() {
 	cmdTest := flag.Bool("cmdtest", false, "命令弹层自检（解析/过滤/渲染/键位/模态互斥）")
 	histTest := flag.Bool("histtest", false, "输入历史自检（入栈/翻历史/让位滚动/编辑退出）")
 	sessTest := flag.Bool("sesstest", false, "会话列表自检（解析/触发/渲染/键位/submit 拦截）")
+	loadTest := flag.Bool("loadtest", false, "会话载入自检（历史重放保序/完成事件落最后/合并护栏/失败路径）")
 	queueTest := flag.Bool("queuetest", false, "输入队列自检（忙时入队/FIFO/状态栏/转正/回合衔接）")
 	elicitTest := flag.Bool("elicittest", false, "追问面板自检（解析/渲染/键位/应答体/队列）")
 	todosTest := flag.Bool("todostest", false, "钉面板自检（渲染/超长截断/开关/布局/View 集成）")
@@ -1789,6 +1825,11 @@ func main() {
 
 	if *sessTest {
 		runSessTest()
+		return
+	}
+
+	if *loadTest {
+		runLoadTest()
 		return
 	}
 
