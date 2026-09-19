@@ -79,6 +79,11 @@ func todoMark(status string) (string, lipgloss.Style) {
 func (m model) renderPanel(height int) []string {
 	var out []string
 
+	// ⓿ 品牌行（2026-09-19 用户点名：letcode 字样从底部状态栏左上挪到右栏
+	// 上方，"好像 crush 一样"）——品牌一行 + 一行呼吸空白。
+	out = append(out, modelStyle.Render("letcode"))
+	out = append(out, "")
+
 	// ① 会话信息
 	out = append(out, dimStyle.Render("会话"))
 	if m.sessTitle != "" {

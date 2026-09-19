@@ -265,6 +265,9 @@ type model struct {
 
 	blinkOn bool
 	blinkN  int
+	// cursorAt 流式光标上次翻转时刻（墙钟驱动）：忙时心跳已提到 50ms
+	// （对齐 crush 20fps），光标不能跟着心跳频闪——每 500ms 翻一次。
+	cursorAt time.Time
 
 	client    *ACPClient
 	sessionID string
@@ -421,7 +424,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case blinkMsg:
-		m.blinkOn = !m.blinkOn
+		// 流式光标按墙钟每 500ms 翻转（与心跳频率解耦：忙时心跳 50ms 对齐
+		// crush 的 20fps 乱码，光标跟着翻会频闪）
+		if m.cursorAt.IsZero() || time.Since(m.cursorAt) >= blinkLag {
+			m.blinkOn = !m.blinkOn
+			m.cursorAt = time.Now()
+		}
 		m.blinkN++
 		m.stepBarAnim()     // M5d：压缩后的上下文条缓动（心跳驱动）
 		m.stepCompactProg() // M11：压缩进度条推进（按已用时长重算）
@@ -1710,7 +1718,8 @@ func blinkAfter(d time.Duration) tea.Cmd {
 }
 
 // blinkInterval 当前心跳间隔：忙时（工作行乱码在闪 §11.6 / 压缩进度条在跑）
-// 用 120ms 快档，闲时回到 500ms（光标闪烁与省略号节奏照旧）。
+// 用 50ms 快档（20fps，对齐 crush anim.go 的 fps），闲时回到 500ms。流式
+// 光标的闪烁相位由墙钟驱动（见 blinkMsg 的 cursorAt），不随心跳频率变化。
 func (m model) blinkInterval() time.Duration {
 	if m.busy {
 		return workFastLag

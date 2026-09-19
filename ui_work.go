@@ -2,7 +2,8 @@
 //
 // 用户口径（2026-09-19）：crush 那样的乱码在闪，后面跟一串**不闪**的点；
 // 闪的节奏像本机 pi 的工作指示器；右侧依次是"是不是 thinking"、时长，
-// 以及 ↑↓ token（上传 / 下来）——能算就算，算不准标 ≈。
+// 以及 ↑ token（↓ 已于 2026-09-19 按"太挤了"反馈撤下）——能算就算，
+// 算不准标 ≈。乱码速度对齐 crush：20fps（50ms/帧，见 workFastLag）。
 // M11 追加口径：整行从底部状态栏搬到输入栏上方（"放上面，长点"），
 // 收尾语（"各种输出完毕之类的"）同样落在这里；压缩时这一行只剩进度条 +
 // 百分比（见 ui_compact.go）。
@@ -10,7 +11,8 @@
 // 三件套的分工（§11.6 的"趣味必须真实"）：
 //   - 乱码块（scrambleBlock）= 纯动效（照 crush internal/ui/anim/anim.go 的
 //     availableRunes + 逐帧重掷 + 亮度渐变）；没有信息量，只告诉用户"引擎在动"；
-//   - 点（workDots）= 静态锚点，不参与动画（和乱码形成"动-静"对比）；
+//   - 点（workDots）= 静态锚点，不参与动画（和乱码形成"动-静"对比），
+//     但颜色跟随主题渐变（2026-09-19 用户点名"....也要跟随渐变"）；
 //   - 状态词 / 时长 / token = 真实信息；token 是客户端估算（协议只给 used/size），
 //     整段带 ≈ 前缀，绝不假装精确。
 package main
@@ -29,11 +31,12 @@ const (
 	// crush 默认 10——整条工作行面积大了，8 格足够抢眼又不喧宾夺主）。
 	workScrambleN = 8
 	// workDots 乱码后面的静态省略号（用户点名「....,....」：特意不做动画，
-	// 闪动只属于乱码块本身，点是锚）。
+	// 闪动只属于乱码块本身，点是锚；颜色跟随主题渐变——见 dotsBlock）。
 	workDots = "....,...."
-	// workFastLag 工作行动画心跳：120ms/帧（约 8fps）。crush 是 20fps；
-	// 整行面积小，放慢一档省重绘，观感仍是"在闪"。
-	workFastLag = 120 * time.Millisecond
+	// workFastLag 工作行动画心跳：50ms/帧（20fps，对齐 crush anim.go 的
+	// fps；2026-09-19 用户点名"要像 crush 的乱码一样的速度"）。流式光标
+	// 的翻转已改墙钟驱动（main.go 的 cursorAt），不会跟着频闪。
+	workFastLag = 50 * time.Millisecond
 )
 
 // workCharset 乱码字符集（照 crush 的 availableRunes，去掉非 ASCII 的 £€）。
@@ -58,6 +61,28 @@ func scrambleBlock(step, seed int) string {
 			h = -h
 		}
 		r := workCharset[h%len(workCharset)]
+		k := 0.5 + 0.8*float64(i)/float64(den)
+		b.WriteString(lipgloss.NewStyle().Foreground(scaleBright(base[i], k)).Render(string(r)))
+	}
+	return b.String()
+}
+
+// dotsBlock 静态省略号：字符不重掷（用户点名"不闪的点"），但每个字符按主题
+// 渐变上色（2026-09-19 用户点名"....也要跟随渐变"）——亮度曲线与乱码块
+// 一致（左暗 → 右亮），两者读起来像一条连续的渐变。确定性：同参可复现。
+func dotsBlock() string {
+	dots := []rune(workDots)
+	n := len(dots)
+	if n == 0 {
+		return ""
+	}
+	base := contextBarGrad(n)
+	den := n - 1
+	if den < 1 {
+		den = 1
+	}
+	var b strings.Builder
+	for i, r := range dots {
 		k := 0.5 + 0.8*float64(i)/float64(den)
 		b.WriteString(lipgloss.NewStyle().Foreground(scaleBright(base[i], k)).Render(string(r)))
 	}
@@ -93,28 +118,23 @@ func (m model) workElapsed() time.Duration {
 	return time.Since(m.turnStart)
 }
 
-// tokenSpan ↑↓ token 段（客户端估算）：↑ = 最近一次 usage 的 used（上下文里
-// 已经发上去的量），↓ = 本回合引擎吐回的字符数 ÷4。协议只给 used/size，
-// 拿不到精确的收发计数——所以整段带 ≈，不装精确。
+// tokenSpan token 段（客户端估算）：↑ = 最近一次 usage 的 used（上下文里
+// 已经发上去的量）。协议只给 used/size，拿不到精确的收发计数——所以整段
+// 带 ≈，不装精确。2026-09-19 用户反馈工作行"太挤了，尤其是 token 那里"：
+// ↓（本回合吐出字符数÷4）撤下只留 ↑；turnChars 照常累加（将来要恢复
+// 显示不用改接线）。
 func (m model) tokenSpan() string {
-	var parts []string
-	if m.usageUsed > 0 {
-		parts = append(parts, "\u2191"+fmtK(m.usageUsed))
-	}
-	if d := int64((m.turnChars + 3) / 4); d > 0 {
-		parts = append(parts, "\u2193"+fmtK(d))
-	}
-	if len(parts) == 0 {
+	if m.usageUsed <= 0 {
 		return ""
 	}
-	return "\u2248" + strings.Join(parts, " ")
+	return "≈↑" + fmtK(m.usageUsed)
 }
 
-// workingLine 工作行：乱码块 + 静态点 + 状态词 + 时长 + ≈↑↓ token。
+// workingLine 工作行：乱码块 + 渐变静态点 + 状态词 + 时长 + ≈↑ token。
 // 拼装式：缺项自动跳过（没时长就不显示时长段，没 token 就不显示 token 段）。
 func (m model) workingLine() string {
 	var segs []string
-	segs = append(segs, scrambleBlock(m.blinkN, m.turnSeq)+dimStyle.Render(workDots))
+	segs = append(segs, scrambleBlock(m.blinkN, m.turnSeq)+dotsBlock())
 	if s := m.workStateWord(); s != "" {
 		segs = append(segs, s)
 	}
@@ -264,17 +284,27 @@ func runWorkTest() {
 	check("乱码块：8 格宽、逐帧重掷、同参可复现、多色（亮度渐变）、只前景色",
 		okBlock && len(colors) >= 3)
 
-	// ② 工作行拼装：乱码 + 静态点 + 状态词 + 时长 + ≈↑↓ token
+	// ② 工作行拼装：乱码 + 静态点 + 状态词 + 时长 + ≈↑ token（↓ 已撤下）
 	m := model{width: 110, status: stThinking, busy: true, blinkN: 3, turnSeq: 0,
 		turnStart: time.Now().Add(-12 * time.Second), usageUsed: 31800, turnChars: 1648}
 	plain := stripANSI(m.workingLine())
 	okLine := strings.Contains(plain, workDots) &&
 		strings.Contains(plain, "思考中") &&
 		strings.Contains(plain, "12s") &&
-		strings.Contains(plain, "\u2248\u219131.8k") &&
-		strings.Contains(plain, "\u2193412") &&
+		strings.Contains(plain, "≈↑31.8k") &&
+		!strings.Contains(plain, "↓") && // 2026-09-19：token 只留 ↑
 		!hasBackgroundColor(m.workingLine())
-	check("工作行：乱码+点+思考中+12s+≈↑31.8k ↓412；只前景色", okLine)
+	check("工作行：乱码+点+思考中+12s+≈↑31.8k（无↓）；只前景色", okLine)
+
+	// ②c 静态点跟随渐变：字符不重掷（同参稳定），但多色（亮度渐变）
+	dots := dotsBlock()
+	dotColors := map[string]bool{}
+	for _, c := range rgbRe.FindAllString(dots, -1) {
+		dotColors[c] = true
+	}
+	okDots := lipgloss.Width(dots) == len(workDots) &&
+		dots == dotsBlock() && len(dotColors) >= 3 && !hasBackgroundColor(dots)
+	check("静态点：不重掷（稳定）、跟随主题渐变（多色）、只前景色", okDots)
 
 	// ②b 缺项自动跳过：没起点 / 没用量 → 只剩乱码 + 点 + 状态词
 	mBare := model{status: stReplying, busy: true, blinkN: 1}

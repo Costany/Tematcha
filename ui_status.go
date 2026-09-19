@@ -218,21 +218,16 @@ func (m model) horizontalWindow() (pre, at, post string) {
 // 状态栏
 // ---------------------------------------------------------------------------
 
-// renderStatusBar 底部状态栏：左 = letcode + 引擎状态 +「模式徽章 | 上下文条 | 模型」，
+// renderStatusBar 底部状态栏：左 = 引擎状态 +「模式徽章 | 上下文条 | 模型」，
 // 右 = 快捷键提示（右对齐）。窄屏时左侧从尾部丢段（模型 → 上下文条 → 模式徽章）。
+// 2026-09-19：letcode 品牌字样挪到右栏上方（照 crush），状态栏不再带前缀。
 func (m model) renderStatusBar() string {
 	right := dimStyle.Render(m.hintText())
-	prefix := modelStyle.Render("letcode") + dimStyle.Render(" \u00B7 ")
 
-	// 左段预算：总宽 - 左右边距 - 右段 - 至少 1 格间隙 - 前缀
-	budget := m.width - 4 - lipgloss.Width(right) - 1 - lipgloss.Width(prefix)
-	// M11：忙时引擎状态段为空（动态信息在工作区）——只有前缀没有内容时
-	// 去掉尾部的 " · "，避免"letcode · "这种悬空的分隔符。
-	state := m.statusLeft(budget)
-	left := prefix + state
-	if state == "" {
-		left = modelStyle.Render("letcode")
-	}
+	// 左段预算：总宽 - 左右边距 - 右段 - 至少 1 格间隙
+	budget := m.width - 4 - lipgloss.Width(right) - 1
+	// M11：忙时引擎状态段为空（动态信息在工作区）——左侧为空时整段留白。
+	left := m.statusLeft(budget)
 
 	pad := m.width - 4 - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 1 {
