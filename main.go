@@ -1192,7 +1192,7 @@ func engineErrorHint(s string) string {
 	case strings.Contains(s, "is not available over ACP"):
 		return "这条命令是 letcode 本地 TUI 专有，ACP 模式下不可用"
 	case strings.Contains(s, "reasoning effort change"):
-		return "当前模型/供应商不接受该推理档位配置 —— 可先 /model 换模型，或运行 /reasoning 查看可选值"
+		return "推理档位被引擎拒绝 —— 若该模型走 anthropic 协议，检查 letcode.toml 的 protocol_settings.anthropic_thinking.mode = \"adaptive\"（缺了它任何档位都会被拒）；也可 /model 换模型或 /reasoning 看可选值"
 	case strings.Contains(s, "could not compact"):
 		return "引擎没提交压缩（常见原因：上下文已在预算内，或另有回合占用）——可稍后再试"
 	case strings.Contains(s, "rejected the session"):

@@ -707,7 +707,8 @@ func runCmdTest() {
 	{
 		okUsage := strings.Contains(engineErrorHint("Usage: /permission safe|default|auto|yolo"), "敲 /")
 		okAcess := strings.Contains(engineErrorHint("/theme is not available over ACP"), "本地 TUI 专有")
-		okReason := strings.Contains(engineErrorHint("agent rejected the session reasoning effort change"), "推理档位")
+		reasonHint := engineErrorHint("agent rejected the session reasoning effort change")
+		okReason := strings.Contains(reasonHint, "推理档位") && strings.Contains(reasonHint, "adaptive")
 		okCompact := strings.Contains(engineErrorHint("letcode could not compact the session context: context is already within budget"), "压缩")
 		okSession := strings.Contains(engineErrorHint("agent rejected the session model change"), "会话设置")
 		okNone := engineErrorHint("some unknown engine error") == ""
