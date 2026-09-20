@@ -358,6 +358,19 @@ func (m model) cmdGuard(text string) (string, bool) {
 			return "", false // 不带参数的命令：引擎直接执行
 		}
 		if arg == "" {
+			// M25：/reasoning 缺参数时，把「当前档位 + 引擎给的可选值」说清楚
+			// （列表来自 session/new 的 configOptions；引擎没给就退回广告 hint）。
+			if c.Name == "reasoning" {
+				cur := m.reasoning
+				if cur == "" {
+					cur = "未知"
+				}
+				list := strings.Join(m.reasoningList, "|")
+				if list == "" {
+					list = c.Hint
+				}
+				return "「/reasoning」还缺参数：当前 " + cur + "，可选 " + list + " —— 敲 / 打开命令列表，选中回车即可补全", true
+			}
 			return "「/" + c.Name + "」还缺参数：" + c.Hint + " —— 敲 / 打开命令列表，选中回车即可补全", true
 		}
 		if vals := hintValues(c.Hint); vals != nil {
@@ -756,6 +769,65 @@ func runCmdTest() {
 		check("/new 失败：错误落屏 + 状态置错",
 			failN.status == stError && failN.feed.Len() == 2 && failN.feed.items[1].Kind == kError &&
 				strings.Contains(failN.feed.items[1].Text, "新建会话失败"))
+	}
+	// ⑬ M25 推理档改道：/reasoning <档位> 归客户端（ACP 的 session/set_config_option），
+	// 不进消息区、不开回合；缺参数提示改用「引擎给的可选值」；成功/失败都走
+	// handleCfgSet（成功 = 状态栏刷新 + 工作区安静收据）。
+	{
+		rm := model{feed: NewFeed(), cmds: engineCmds(), reasoning: "medium",
+			reasoningList: []string{"none", "low", "medium", "high", "max"}}
+		msg, blocked := rm.cmdGuard("/reasoning")
+		okBareList := blocked && strings.Contains(msg, "当前 medium") &&
+			strings.Contains(msg, "none|low|medium|high|max")
+		// 引擎给了配置项那一次，提示里不该再出现广告 hint 的幽灵档位
+		okNoGhost := !strings.Contains(msg, "off|none|minimal")
+		check("护栏：/reasoning 缺参数报「当前档位 + 引擎给的可选值」（不掺广告 hint 幽灵值）",
+			okBareList && okNoGhost)
+
+		smR := model{width: 100, feed: NewFeed(), status: stIdle, cmds: engineCmds()}
+		smR.input.SetText("/reasoning high")
+		nextR, cmdR := smR.submit()
+		smR = nextR.(model)
+		check("submit('/reasoning high')：归客户端（消息区零条目 / 输入清空 / 进历史 / 不开回合）",
+			!smR.busy && smR.feed.Len() == 0 && smR.input.Text() == "" &&
+				len(smR.sent) == 1 && smR.sent[0] == "/reasoning high" && cmdR == nil)
+
+		bsR := model{width: 100, feed: NewFeed(), status: stIdle, busy: true, cmds: engineCmds()}
+		bsR.input.SetText("/reasoning high")
+		nextBR, cmdBR := bsR.submit()
+		bsR = nextBR.(model)
+		check("/reasoning 护栏：回合进行中拦下（输入保留 / 落一条提示 / 不发配置请求）",
+			cmdBR == nil && bsR.feed.Len() == 1 && bsR.feed.items[0].Kind == kSys &&
+				strings.Contains(bsR.feed.items[0].Text, "回合进行中") && bsR.input.Text() == "/reasoning high")
+
+		// 成功收尾：引擎确认后的配置项刷新状态栏（档位/可选值）+ 工作区安静收据，
+		// 消息区零条目 —— 用户点名「切换思考模式不应该显示在消息区」。
+		cmR := model{width: 100, height: 30, feed: NewFeed(), status: stIdle}
+		cmR.syncLayout()
+		opts := []any{map[string]any{
+			"id": "reasoning_effort", "currentValue": "xhigh",
+			"options": []any{
+				map[string]any{"value": "none", "name": "none"},
+				map[string]any{"value": "xhigh", "name": "xhigh"},
+			},
+		}}
+		cmR2, _ := cmR.handleCfgSet(cfgSetMsg{configID: reasoningConfigID, value: "xhigh", opts: opts})
+		cmR = cmR2.(model)
+		check("cfgSet 成功：状态栏档位刷新 + 可选值刷新 + 工作区收据 + 消息区零条目",
+			cmR.reasoning == "xhigh" && len(cmR.reasoningList) == 2 &&
+				cmR.closeKind == closeOK && cmR.closeLine == "推理档 → xhigh" && cmR.feed.Len() == 0)
+
+		// 失败：引擎对无效值只回通用拒绝（真机取证 -32600 "letcode rejected the
+		// session reasoning effort change"）——可选列表在手时直接报可选范围。
+		fmR := model{width: 100, feed: NewFeed(), status: stIdle,
+			reasoningList: []string{"none", "low", "medium", "high", "max"}}
+		fmR2, _ := fmR.handleCfgSet(cfgSetMsg{configID: reasoningConfigID, value: "invalid_val",
+			err: fmt.Errorf("letcode rejected the session reasoning effort change")})
+		fmR = fmR2.(model)
+		check("cfgSet 失败：落 kError 并报可选范围（不往 adaptive 配置上引）",
+			fmR.feed.Len() == 1 && fmR.feed.items[0].Kind == kError &&
+				strings.Contains(fmR.feed.items[0].Text, "不在可选范围") &&
+				strings.Contains(fmR.feed.items[0].Text, "none|low|medium|high|max"))
 	}
 
 	if failed {

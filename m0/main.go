@@ -167,9 +167,32 @@ func isResponseWithID(line string, want int) bool {
 	return ok && int(n) == want
 }
 
+// sendSetConfig 发一条 session/set_config_option（M25 探针）。
+// spec 形态 "<configId>=<value>"（如 reasoning_effort=high）。
+func sendSetConfig(send func(any), sessionID, spec string) {
+	i := strings.Index(spec, "=")
+	if i <= 0 {
+		logLine("!!", "-setcfg 格式应为 <configId>=<value>")
+		return
+	}
+	cfgID, cfgVal := spec[:i], spec[i+1:]
+	logLine("..", fmt.Sprintf("发送 set_config_option：%s=%s", cfgID, cfgVal))
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      4,
+		"method":  "session/set_config_option",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"configId":  cfgID,
+			"value":     cfgVal,
+		},
+	})
+}
+
 func main() {
 	wait := flag.Duration("wait", 0, "握手后等待时长；0 = 一直挂到 Ctrl+C（M0 用）")
 	promptText := flag.String("prompt", "", "非空时：握手完成后发送这句话并流式打印（M0.5 用）")
+	setCfg := flag.String("setcfg", "", "M25 探针：握手后发 session/set_config_option，格式 \"<configId>=<value>\"（如 reasoning_effort=high）")
 	flag.Parse()
 
 	var err error
@@ -226,7 +249,8 @@ func main() {
 	// ── 3. 读侧：持续打印；推进握手；M0.5 流式渲染 ────────────────
 	done := make(chan struct{})
 	turnDone := make(chan struct{})
-	var turnOnce sync.Once
+	cfgDone := make(chan struct{}) // -setcfg 的应答到达
+	var turnOnce, cfgOnce sync.Once
 	var sessionID string
 	streaming := false
 
@@ -300,6 +324,11 @@ func main() {
 						},
 					})
 				}
+				// M25 探针：同时带 -setcfg 时紧跟着 prompt 发配置请求——
+				// 顺手验证引擎在回合进行中收不收设置命令（时序看 trace/控制台）。
+				if *setCfg != "" {
+					sendSetConfig(send, sessionID, *setCfg)
+				}
 			}
 			if isResponseWithID(line, 3) {
 				var resp struct {
@@ -311,6 +340,31 @@ func main() {
 				flushStream()
 				logLine("..", fmt.Sprintf("回合结束：stopReason=%s", resp.Result.StopReason))
 				turnOnce.Do(func() { close(turnDone) })
+			}
+			// M25 探针：set_config_option 的应答（成功带 configOptions，失败是 error 对象——
+			// 两种形态的原始 JSON 都在上一行打印；这里做语义摘要）。
+			if isResponseWithID(line, 4) {
+				var resp struct {
+					Result struct {
+						ConfigOptions []struct {
+							ID           string `json:"id"`
+							CurrentValue any    `json:"currentValue"`
+						} `json:"configOptions"`
+					} `json:"result"`
+				}
+				_ = json.Unmarshal([]byte(line), &resp)
+				got := ""
+				for _, o := range resp.Result.ConfigOptions {
+					if o.ID == "reasoning_effort" {
+						got = fmt.Sprintf("reasoning_effort=%v", o.CurrentValue)
+					}
+				}
+				if got == "" {
+					logLine("..", "set_config_option 应答已到（未见 reasoning_effort 选项；原始 JSON 见上一行）")
+				} else {
+					logLine("..", "set_config_option 应答 OK："+got)
+				}
+				cfgOnce.Do(func() { close(cfgDone) })
 			}
 		}
 		flushStream()
@@ -333,16 +387,33 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 
+	// 汇总本次运行需要的完成信号：-prompt 等回合应答、-setcfg 等配置应答
+	// （两者都可缺席）；都到齐（或引擎退出/超时）才收工。
+	allDone := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		if *promptText != "" {
+			wg.Add(1)
+			go func() { defer wg.Done(); <-turnDone }()
+		}
+		if *setCfg != "" {
+			wg.Add(1)
+			go func() { defer wg.Done(); <-cfgDone }()
+		}
+		wg.Wait()
+		close(allDone)
+	}()
+
 	switch {
-	case *promptText != "":
+	case *promptText != "" || *setCfg != "":
 		select {
 		case <-done:
-		case <-turnDone:
-			logLine("..", "对话完毕，自动退出（再玩就再跑一遍）")
+		case <-allDone:
+			logLine("..", "探针完成，自动退出（再玩就再跑一遍）")
 		case <-sig:
 			logLine("..", "收到 Ctrl+C")
 		case <-time.After(180 * time.Second):
-			logLine("..", "等待回合结束超时（180s），退出")
+			logLine("..", "等待完成超时（180s），退出")
 		}
 	default:
 		if *wait > 0 {

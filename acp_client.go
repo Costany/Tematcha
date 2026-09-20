@@ -250,6 +250,20 @@ func (c *ACPClient) Call(method string, params map[string]any, timeout time.Dura
 	}
 }
 
+// SetConfigOption 请求 session/set_config_option（M25）：引擎异步应用配置项，
+// 应用完成（或失败）后应答——成功时应答里带最新的完整配置项列表
+// （configOptions，形状同 session/new；letcode acp/driver.rs 的 settle_command
+// 分支：引擎上报 ReasoningEffortChanged 后先广播 config_option_update 再回这条
+// 应答）。请求体字段取证：ACP schema v1 的 SetSessionConfigOptionRequest
+// （sessionId / configId / value；value-id 形态不带 type 字段）。
+func (c *ACPClient) SetConfigOption(sessionID, configID, value string) (map[string]any, error) {
+	return c.Call("session/set_config_option", map[string]any{
+		"sessionId": sessionID,
+		"configId":  configID,
+		"value":     value,
+	}, 15*time.Second)
+}
+
 // Notify 发一条通知（不等响应）。
 func (c *ACPClient) Notify(method string, params map[string]any) error {
 	return c.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})

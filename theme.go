@@ -80,6 +80,11 @@ type Theme struct {
 	// 用户 2026-09-20 点名"颜色鲜艳点、主色绿色不要换、不要暗暗的绿色"——
 	// 所以两端都是亮绿，不碰 Grad 系的深植绿。mono 下退化为灰阶。
 	WorkGradA, WorkGradB string
+
+	// 推理档调色（M25：照本机 pi 的 statusline 扩展，档位高低各一色）。
+	// low 绿 / medium 黄 / high 橙 / xhigh 青 / max 玫粉；none·minimal 退灰
+	// （用 Dim，不占 token）；引擎自定义档位用正文色，不瞎猜强弱。mono 退灰阶。
+	ThinkLow, ThinkMed, ThinkHigh, ThinkXhi, ThinkMax string
 }
 
 // sproutTheme 内置默认主题：翠绿（2026-09-19 定调，只求"绿绿的"清新观感，
@@ -100,6 +105,7 @@ var sproutTheme = Theme{
 	GradA: "#C8F5A0", GradB: "#5FCC6E", GradC: "#2F7D46",
 	BrandA: "#5AC54F", BrandB: "#F5F5F0", BrandC: "#F5A623",
 	WorkGradA: "#4EE05E", WorkGradB: "#C8F5A0",
+	ThinkLow: "#8CE28A", ThinkMed: "#E6C455", ThinkHigh: "#F5A25C", ThinkXhi: "#7CD8E8", ThinkMax: "#F06FA8",
 }
 
 // monoTheme 灰度主题：全部无色相（R=G=B）。
@@ -120,6 +126,7 @@ var monoTheme = Theme{
 	GradA: "#F0F0F0", GradB: "#C8C8C8", GradC: "#8C8C8C",
 	BrandA: "#F0F0F0", BrandB: "#C8C8C8", BrandC: "#8C8C8C",
 	WorkGradA: "#C8C8C8", WorkGradB: "#F0F0F0",
+	ThinkLow: "#A8A8A8", ThinkMed: "#BCBCBC", ThinkHigh: "#D0D0D0", ThinkXhi: "#E0E0E0", ThinkMax: "#F0F0F0",
 }
 
 var (
@@ -498,6 +505,46 @@ func runThemeTest() {
 	applyTheme(sproutTheme)
 	check("防晃眼：sprout 正文/柔白粗体/柔绿代码在场且纯白缺席；mono 对应柔灰（粗体 #F0F0F0 / 代码 #B0B0B0）",
 		okGlareSprout && okGlareMono)
+
+	// ④d M25 推理档配色（照本机 pi statusline 扩展的 getEffortColor：low 绿 /
+	// medium 黄 / high 橙 / xhigh 青 / max 玫粉；none/minimal/off 退次要灰，
+	// 未知自定义档位用正文色）。色板在 theme.go、断言在这里——改色必同步。
+	applyTheme(sproutTheme)
+	firstRGB := func(s string) string {
+		if m := rgbRe.FindStringSubmatch(s); m != nil {
+			return m[1] + ";" + m[2] + ";" + m[3]
+		}
+		return ""
+	}
+	thinkCases := []struct{ level, want string }{
+		{"low", "140;226;138"},   // #8CE28A
+		{"medium", "230;196;85"}, // #E6C455
+		{"high", "245;162;92"},   // #F5A25C
+		{"xhigh", "124;216;232"}, // #7CD8E8
+		{"max", "240;111;168"},   // #F06FA8
+	}
+	okThink := true
+	seen := map[string]bool{}
+	for _, c := range thinkCases {
+		got := firstRGB(reasoningStyle(c.level).Render("x"))
+		if got != c.want {
+			okThink = false
+			fmt.Printf("      推理档 %s：期望 %s 实际 %s\n", c.level, c.want, got)
+		}
+		seen[got] = true
+	}
+	// 五档必须彼此可区分：同一个色 = 用户看不出档位差别
+	okThink = okThink && len(seen) == len(thinkCases)
+	applyTheme(monoTheme)
+	okThinkMono := !hasNonGrayColor(reasoningStyle("none").Render("x"))
+	for _, c := range thinkCases {
+		if hasNonGrayColor(reasoningStyle(c.level).Render("x")) {
+			okThinkMono = false
+		}
+	}
+	applyTheme(sproutTheme)
+	check("推理档配色：sprout 五档各就各位且互不相同；mono 全灰（含 none 降级档）",
+		okThink && okThinkMono)
 
 	// ⑤ 渐变：10 格、端点 = A / C、50% 填充格 ≥3 种颜色（确实在渐变）
 	grad := contextBarGrad(10)

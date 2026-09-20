@@ -295,8 +295,12 @@ type model struct {
 	// config_option_update 同步；usage 来自 usage_update。
 	modeID    string // safe / default / auto / yolo
 	reasoning string // 思考档显示名（configOptions 的 reasoning_effort；可空）
-	usageUsed int64  // 上下文已用 token
-	usageSize int64  // 上下文窗口大小
+	// reasoningList = 引擎给的可选档位（configOptions 的 options[].value，按引擎顺序）。
+	// 缺参数提示与「档位被拒」的错误文案都用它；空 = 引擎没给这个选项
+	// （M24 排查出的配置病根指纹：selectable 为空则该模型任何档位都会被拒）。
+	reasoningList []string
+	usageUsed     int64 // 上下文已用 token
+	usageSize     int64 // 上下文窗口大小
 
 	// M3b 右栏（§4/§5）：会话标题 / 待办快照 / 右栏开关（默认开，窄屏自动隐藏）。
 	sessTitle string
@@ -390,7 +394,7 @@ type model struct {
 	closeKind int
 }
 
-func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasoning string) model {
+func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasoning string, reasoningList []string) model {
 	return model{
 		width:         80,
 		height:        24,
@@ -402,6 +406,7 @@ func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasonin
 		modelProvider: modelProvider,
 		modeID:        modeID,
 		reasoning:     reasoning,
+		reasoningList: reasoningList,
 		panelOn:       true,
 		todosOn:       true,
 		tools:         make(map[string]*FeedItem),
@@ -458,6 +463,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case turnDoneMsg:
 		return m.handleTurnDone(msg)
+
+	// M25：/reasoning <档位> 走 ACP 配置项请求，收尾走 handleCfgSet。
+	case cfgSetMsg:
+		return m.handleCfgSet(msg)
 
 	case sessListMsg:
 		m.sessReady = true
@@ -818,6 +827,94 @@ func (m model) handleRightClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	return m, clipboardCmd(text)
 }
 
+// reasoningConfigID ACP 配置项 id（letcode acp/session_state.rs 的
+// CONFIG_REASONING_EFFORT）。/model 与 mode 两个同级配置项暂时仍走引擎命令，
+// 等有需求再同一套路收编。
+const reasoningConfigID = "reasoning_effort"
+
+// reasoningArg 识别「/reasoning <档位>」形态（M25）：命中返回档位原文。
+// /reasoning 无参不算（仍走护栏的「还缺参数」提示）；/reasoningx 之类的近似词
+// 与别的命令都不接管（typedCommandName 只认 "/词 [参数]" 形态）。
+func reasoningArg(text string) (string, bool) {
+	name, arg, ok := typedCommandName(text)
+	if !ok || name != "reasoning" || arg == "" {
+		return "", false
+	}
+	return arg, true
+}
+
+// cfgSetMsg 配置项设置的异步结果（M25：/reasoning 这类本地设置命令）。
+// opts = 引擎确认后的完整配置项列表（形状同 session/new 的 configOptions）。
+type cfgSetMsg struct {
+	configID string
+	value    string
+	opts     []any
+	err      error
+}
+
+// setConfigOptionAsync 走 ACP 的 session/set_config_option 请求：引擎异步应用，
+// 应用完成（或失败）后回一条应答——不打 prompt、不占回合、不进消息流。
+// 没连引擎（自检里的无 client model）时返回 nil。
+func setConfigOptionAsync(c *ACPClient, sid, configID, value string) tea.Cmd {
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		res, err := c.SetConfigOption(sid, configID, value)
+		var opts []any
+		if res != nil {
+			opts = asList(res["configOptions"])
+		}
+		return cfgSetMsg{configID: configID, value: value, opts: opts, err: err}
+	}
+}
+
+// handleCfgSet 配置项设置的收尾（M25）：
+//   - 成功 → 用引擎确认后的配置项刷新状态栏（推理档/模型/模式）+ 工作区一行
+//     安静收据（closeLine）——消息区零条目（用户点名：「切换思考模式不应该
+//     显示在消息区，应该找个地方显示目前思考级别的」）。
+//   - 失败 → kError 落屏（带 engineErrorHint 的「怎么办」提示，和回合出错同口径）。
+func (m model) handleCfgSet(msg cfgSetMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		e := msg.err.Error()
+		hint := engineErrorHint(e)
+		switch {
+		case strings.Contains(e, "reasoning") && len(m.reasoningList) > 0:
+			// 可选列表在手：引擎的拒绝文案是通用的（-32600），真正原因多半是
+			// 「值不在可选范围」——直接把可选值报出来，别往 adaptive 配置上引。
+			m.feed.Append(kError, fmt.Sprintf("推理档切换失败：%s 不在可选范围（可选 %s）",
+				msg.value, strings.Join(m.reasoningList, "|")))
+		case hint != "" && (strings.Contains(e, "reasoning") || strings.Contains(e, "rejected the session")):
+			m.feed.Append(kError, "推理档切换失败："+hint)
+		default:
+			it := m.feed.Append(kError, "推理档切换失败："+e)
+			it.Detail = hint
+		}
+		m.feed.ScrollToBottom()
+		return m, nil
+	}
+	// 引擎确认后的配置项是最新真值；config_option_update 通知随后还会到，
+	// 两处都是幂等的覆盖写，重复刷新无害。
+	name := msg.value
+	if r := reasoningFromOptions(msg.opts); r != "" {
+		m.reasoning = r
+		name = r
+	}
+	if l, p := modelFromOptions(msg.opts); l != "" {
+		m.modelLabel, m.modelProvider = l, p
+	}
+	if md := modeFromOptions(msg.opts); md != "" {
+		m.modeID = md
+	}
+	if vals := reasoningValuesFromOptions(msg.opts); len(vals) > 0 {
+		m.reasoningList = vals
+	}
+	m.closeLine = "推理档 → " + name
+	m.closeKind = closeOK
+	m.syncLayout() // 工作区从"不占行"变成一行：消息区高度要重算
+	return m, nil
+}
+
 // submit 提交当前输入：空闲 → 直接开回合；回合进行中 → 排队（M3c）。
 // 空文本忽略；护栏拦下的命令只提示不发送。
 func (m model) submit() (tea.Model, tea.Cmd) {
@@ -907,6 +1004,23 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.feed.Append(kWarn, guard)
 		}
 		return m, nil
+	}
+
+	// M25：/reasoning <档位> 归客户端 —— 走 ACP 的 session/set_config_option，
+	// 不再当对话回合发（用户点名「切换思考模式不应该显示在消息区」，同时点名学
+	// 本机 pi 的 statusline：当前档位常驻底部状态栏）。不回显、不占回合；结果由
+	// 工作区安静收据 / 状态栏刷新 / 失败 kError 呈现。
+	// 回合进行中先拦下（同 /compact 口径）：设置命令独占一次引擎往返，
+	// 跟回合抢时序只会让收据迟到。
+	if arg, ok := reasoningArg(text); ok {
+		if m.busy {
+			m.feed.ScrollToBottom()
+			m.feed.Append(kSys, "回合进行中：先等它结束（或 esc 取消）再切换推理档")
+			return m, nil
+		}
+		m.input.Clear()
+		m.histPush(text)
+		return m, setConfigOptionAsync(m.client, m.sessionID, reasoningConfigID, arg)
 	}
 
 	m.input.Clear()
@@ -1143,6 +1257,9 @@ func (m model) handleNewSession(msg newSessionDoneMsg) (tea.Model, tea.Cmd) {
 		if r := reasoningFromOptions(opts); r != "" {
 			m.reasoning = r
 		}
+		if vals := reasoningValuesFromOptions(opts); len(vals) > 0 {
+			m.reasoningList = vals
+		}
 	}
 	m.status = stDone
 	m.feed.Append(kSys, "已开始新会话 "+msg.sid+"（旧会话可用 /resume 找回）")
@@ -1319,6 +1436,9 @@ func (m *model) handleSessionUpdate(params map[string]any) {
 		}
 		if r := reasoningFromOptions(opts); r != "" {
 			m.reasoning = r
+		}
+		if vals := reasoningValuesFromOptions(opts); len(vals) > 0 {
+			m.reasoningList = vals
 		}
 	case "plan":
 		// 待办全量快照（每次整体替换；blocked→pending、cancelled→completed 为引擎侧有损映射，接受）
@@ -1682,6 +1802,30 @@ func reasoningFromOptions(opts []any) string {
 		return cur
 	}
 	return ""
+}
+
+// reasoningValuesFromOptions 取「可选档位」的值列表（option id = "reasoning_effort"
+// 的 options[].value，按引擎给的顺序）。空 = 引擎没给这个选项（该模型/配置下没有
+// 可选档位）——缺参数提示与错误文案据此分流。
+func reasoningValuesFromOptions(opts []any) []string {
+	for _, o := range opts {
+		opt := asMap(o)
+		if opt == nil || opt["id"] != "reasoning_effort" {
+			continue
+		}
+		var vals []string
+		for _, e := range asList(opt["options"]) {
+			entry := asMap(e)
+			if entry == nil {
+				continue
+			}
+			if v, _ := entry["value"].(string); v != "" {
+				vals = append(vals, v)
+			}
+		}
+		return vals
+	}
+	return nil
 }
 
 // modelFromOptions 从 ACP 的配置项数组里解析模型显示名与供应商。
@@ -2125,8 +2269,9 @@ func main() {
 	}
 
 	modeID := modeFromSession(sess)
-	reasoning := reasoningFromOptions(asList(sess["configOptions"]))
-	p := tea.NewProgram(initialModel(client, sid, modelLabel, modelProvider, modeID, reasoning))
+	cfgOpts := asList(sess["configOptions"])
+	reasoning := reasoningFromOptions(cfgOpts)
+	p := tea.NewProgram(initialModel(client, sid, modelLabel, modelProvider, modeID, reasoning, reasoningValuesFromOptions(cfgOpts)))
 	if _, err := p.Run(); err != nil {
 		fmt.Println("TUI 退出:", err)
 	}

@@ -306,6 +306,10 @@ func (m model) statusLeft(budget int) string {
 	if s := m.renderModelSeg(); s != "" {
 		segs = append(segs, s)
 	}
+	// M25：推理档段（档位配色）挂模型后面；窄屏降级时它最先让位。
+	if s := m.renderReasoningSeg(); s != "" {
+		segs = append(segs, s)
+	}
 	if len(segs) == 0 {
 		return ""
 	}
@@ -384,16 +388,44 @@ func (m model) renderContextBar() string {
 	return bar + " " + st.Render(fmt.Sprintf("%d%%", pct)) + " " + tail
 }
 
-// renderModelSeg 模型段：模型名（有思考档时附在其后）。
+// renderModelSeg 模型段：模型名。
 func (m model) renderModelSeg() string {
 	if m.modelLabel == "" {
 		return ""
 	}
-	s := textStyle.Render(m.modelLabel)
-	if m.reasoning != "" {
-		s += dimStyle.Render(" \u00B7 ") + dimStyle.Render(m.reasoning)
+	return textStyle.Render(m.modelLabel)
+}
+
+// renderReasoningSeg 推理档段（M25）：标签 + 档位值，值按档位强弱上色。
+// 用户口径（2026-09-20 截图）：「切换思考模式不应该显示在消息区，应该找个地方
+// 显示目前思考级别的」+ 点名学本机 pi 的 statusline 扩展——这里是那个地方；
+// 引擎没给档位（configOptions 里没有 reasoning_effort）时不占段。
+func (m model) renderReasoningSeg() string {
+	if m.reasoning == "" {
+		return ""
 	}
-	return s
+	return dimStyle.Render("推理") + " " + reasoningStyle(m.reasoning).Bold(true).Render(m.reasoning)
+}
+
+// reasoningStyle 档位 → 颜色（照 pi statusline 扩展的 getEffortColor：low 绿 /
+// medium 黄 / high 橙 / xhigh 青 / max 玫粉；none·minimal 退次要灰，未知的
+// 自定义档位用正文色——不瞎猜强弱）。mono 主题下这些 token 全是灰阶。
+func reasoningStyle(level string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.ThinkLow))
+	case "medium", "med":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.ThinkMed))
+	case "high":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.ThinkHigh))
+	case "xhigh":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.ThinkXhi))
+	case "max":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(activeTheme.ThinkMax))
+	case "none", "minimal", "off":
+		return dimStyle
+	}
+	return textStyle
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +501,35 @@ func runStatusTest() {
 		}
 		fmt.Printf("  pct=%d%% 期望 %s → %v\n", c.used/1000, c.name, ok)
 	}
+	// M25：推理档段（照本机 pi statusline 的 getEffortColor）——档位 → 颜色，
+	// 且引擎没给档位时该段整体缺席（不占位、不猜）。
+	fmt.Println()
+	fmt.Println("推理档段抽查（状态栏渲染 SGR 颜色）：")
+	for _, c := range []struct {
+		level string
+		sgr   string
+		name  string
+	}{
+		{"low", "38;2;140;226;138", "体绿 #8CE28A"},
+		{"medium", "38;2;230;196;85", "暖黄 #E6C455"},
+		{"high", "38;2;245;162;92", "橙 #F5A25C"},
+		{"xhigh", "38;2;124;216;232", "青 #7CD8E8"},
+		{"max", "38;2;240;111;168", "玫粉 #F06FA8"},
+	} {
+		rm := model{status: stIdle, width: 110, modelLabel: "Step 3.7 Flash", reasoning: c.level}
+		line := rm.renderStatusBar()
+		ok := strings.Contains(line, c.sgr) && strings.Contains(stripANSI(line), "推理 "+c.level)
+		if !ok {
+			bad = true
+		}
+		fmt.Printf("  %-6s 期望 %s → %v\n", c.level, c.name, ok)
+	}
+	noSeg := model{status: stIdle, width: 110, modelLabel: "Step 3.7 Flash"}
+	segGone := !strings.Contains(stripANSI(noSeg.renderStatusBar()), "推理")
+	if !segGone {
+		bad = true
+	}
+	fmt.Printf("  引擎没给档位 → 该段缺席：%v\n", segGone)
 
 	if bad {
 		fmt.Println("statustest: 有失败项")
