@@ -71,10 +71,15 @@ type Theme struct {
 
 	// 柔绿渐变锚点（§11.5：A 青柠黄绿 → B 草绿 → C 深植绿）
 	GradA, GradB, GradC string
-
 	// 品牌渐变锚点（§11.5：A 翠绿 → B 素白 → C 暖橙）。
 	// 只用于右栏顶部品牌行（逐字符取色）；mono 下退化为灰阶。
 	BrandA, BrandB, BrandC string
+
+	// 工作行乱码流光渐变锚点（M21：A 鲜艳绿 → B 浅绿）。
+	// 照 crush anim.go 的 CycleColors 双色坡道（A→B→A→B 每帧滑 1 格）；
+	// 用户 2026-09-20 点名"颜色鲜艳点、主色绿色不要换、不要暗暗的绿色"——
+	// 所以两端都是亮绿，不碰 Grad 系的深植绿。mono 下退化为灰阶。
+	WorkGradA, WorkGradB string
 }
 
 // sproutTheme 内置默认主题：翠绿（2026-09-19 定调，只求"绿绿的"清新观感，
@@ -92,9 +97,9 @@ var sproutTheme = Theme{
 	PanelValID: "#5AC54F", PanelValModel: "#F88F00", PanelValMode: "#E03A3A",
 	Warn: "#F5A25C", Reply: "#7CC8F8", PromptOff: "#4E5E4E", PromptOn: "#3FCF52",
 	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC", Code: "#29B72D",
-
 	GradA: "#C8F5A0", GradB: "#5FCC6E", GradC: "#2F7D46",
 	BrandA: "#5AC54F", BrandB: "#F5F5F0", BrandC: "#F5A623",
+	WorkGradA: "#4EE05E", WorkGradB: "#C8F5A0",
 }
 
 // monoTheme 灰度主题：全部无色相（R=G=B）。
@@ -112,9 +117,9 @@ var monoTheme = Theme{
 	PanelValID: "#C8C8C8", PanelValModel: "#B0B0B0", PanelValMode: "#A8A8A8",
 	Warn: "#DDDDDD", Reply: "#C4C4C4", PromptOff: "#4A4A4A", PromptOn: "#D0D0D0",
 	Heading: "#F2F2F2", Link: "#C4C4C4", Emph: "#B0B0B0", Code: "#B0B0B0",
-
 	GradA: "#F0F0F0", GradB: "#C8C8C8", GradC: "#8C8C8C",
 	BrandA: "#F0F0F0", BrandB: "#C8C8C8", BrandC: "#8C8C8C",
+	WorkGradA: "#C8C8C8", WorkGradB: "#F0F0F0",
 }
 
 var (
@@ -269,6 +274,28 @@ func brandText(s string) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(grad[i]).Render(string(r)))
 	}
 	return b.String()
+}
+
+var (
+	workCacheName string
+	workCache     []color.Color
+)
+
+// workGrad 取 n 格工作行流光坡道（A → B → A → B，CIELAB 混合）。
+// 照 crush anim.go 的 CycleColors：坡道长 = 流动区宽 × 3，每帧偏移 +1、
+// 走 2×宽 后归零——渐变坡道在字符块上滑动，即"流光"。与 contextBarGrad /
+// brandGrad 各一套缓存：锚点不同（见 Theme.WorkGradA/B）。
+func workGrad(n int) []color.Color {
+	if workCacheName == activeTheme.Name && len(workCache) == n {
+		return workCache
+	}
+	workCache = lipgloss.Blend1D(n,
+		lipgloss.Color(activeTheme.WorkGradA),
+		lipgloss.Color(activeTheme.WorkGradB),
+		lipgloss.Color(activeTheme.WorkGradA),
+		lipgloss.Color(activeTheme.WorkGradB))
+	workCacheName = activeTheme.Name
+	return workCache
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +521,14 @@ func runThemeTest() {
 		strings.Contains(bar91, "38;2;201;123;123") && !strings.Contains(bar91, "38;2;245;162;92")
 	check("上下文条：绿档 = 渐变 A→B→C（填充 5 格 ≥3 色、最左 = A、最右 = C）；黄/红档整段换色",
 		okGrad && okTiers)
+
+	// ⑤b 工作行流光坡道（M21）：端点 = WorkGradA/B（A→B→A→B 四停），
+	//     长度 = 流动区宽 × 3（crush CycleColors 口径）。
+	wg := workGrad(workFlowN() * 3)
+	okWorkGrad := len(wg) == workFlowN()*3 &&
+		rgbTriple(wg[0]) == rgbTriple(lipgloss.Color(sproutTheme.WorkGradA)) &&
+		rgbTriple(wg[len(wg)-1]) == rgbTriple(lipgloss.Color(sproutTheme.WorkGradB))
+	check("工作行流光坡道：A→B→A→B（端点 = WorkGradA/B，长 = 流动区宽×3）", okWorkGrad)
 
 	// ⑥ 切换主题必须作废 markdown 渲染器缓存（否则 markdown 还用旧色）
 	_ = mdRenderer(40)

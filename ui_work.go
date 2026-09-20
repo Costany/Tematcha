@@ -1,24 +1,33 @@
-// ui_work.go —— 工作区与灵动工作行（§11.6 · M10/M11）：输入栏正上方的一行。
+// ui_work.go —— 工作区与灵动工作行（§11.6 · M10/M11/M21）：输入栏正上方的一行。
 //
 // 用户口径（2026-09-19）：crush 那样的乱码在闪，后面跟一串**不闪**的点；
 // 闪的节奏像本机 pi 的工作指示器；右侧依次是"是不是 thinking"、时长，
-// 以及 ↑ token（↓ 已于 2026-09-19 按"太挤了"反馈撤下）——能算就算，
-// 算不准标 ≈。乱码速度对齐 crush：20fps（50ms/帧，见 workFastLag）。
+// 以及 ↑ token（↓ 已于 2026-09-19 按"太挤了"反馈撤下）。乱码速度对齐
+// crush：20fps（50ms/帧，见 workFastLag）。
 // M11 追加口径：整行从底部状态栏搬到输入栏上方（"放上面，长点"），
 // 收尾语（"各种输出完毕之类的"）同样落在这里；压缩时这一行只剩进度条 +
 // 百分比（见 ui_compact.go）。
+// M21 追加口径（2026-09-20，附截图）：① 乱码要"渐变流光"——照 crush
+// anim.go 的 CycleColors（A→B→A→B 坡道每帧滑 1 格），渐变色要鲜艳、
+// 主色保持绿、不要暗绿（Theme.WorkGradA/B 两端都是亮绿）；② token 去掉
+// ≈（used 是引擎广播的精确值，本来就不该标约等；pi 的 extension 同样
+// 直显）；③ 各段"距离不要那么近"——**当日回退**：先试过"四段等距分摊
+// 整行"，被点名"不是叫你拉这么大的距离，回归左对齐"，现为左对齐 ·
+// 连接（间距交给分隔符）。
 //
 // 三件套的分工（§11.6 的"趣味必须真实"）：
 //   - 乱码块（scrambleBlock）= 纯动效（照 crush internal/ui/anim/anim.go 的
-//     availableRunes + 逐帧重掷 + 亮度渐变）；没有信息量，只告诉用户"引擎在动"；
-//   - 点（workDots）= 静态锚点，不参与动画（和乱码形成"动-静"对比），
-//     但颜色跟随主题渐变（2026-09-19 用户点名"....也要跟随渐变"）；
-//   - 状态词 / 时长 / token = 真实信息；token 是客户端估算（协议只给 used/size），
-//     整段带 ≈ 前缀，绝不假装精确。
+//     availableRunes + 逐帧重掷 + 流光坡道取色）；没有信息量，只告诉
+//     用户"引擎在动"；
+//   - 点（workDots）= 静态锚点，字符不参与动画（和乱码形成"动-静"对比），
+//     但颜色跟着同一条流光坡道走（2026-09-19 用户点名"....也要跟随渐变"）；
+//   - 状态词 / 时长 / token = 真实信息；↑ 的 used 是引擎 usage_update
+//     广播的精确值（协议只给 used/size，拿不到的收发计数才是估算）。
 package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"strings"
 	"time"
@@ -42,18 +51,34 @@ const (
 // workCharset 乱码字符集（照 crush 的 availableRunes，去掉非 ASCII 的 £€）。
 const workCharset = "0123456789abcdefABCDEF~!@#$%^&*()+=_"
 
+// workFlowN 流动区总宽（乱码块 + 静态点）：坡道长度与帧偏移都按它算——
+// 乱码与点读起来是同一条连续的流光，而不是两段各流各的。
+func workFlowN() int { return workScrambleN + len([]rune(workDots)) }
+
+// workRamp 流光坡道：3 × 流动区宽的 A→B→A→B（workGrad，按主题缓存）。
+func workRamp() []color.Color { return workGrad(workFlowN() * 3) }
+
+// workFlowOff 帧偏移：step % (2 × 流动区宽)。与 crush 的 numFrames 同口径
+// （offset 走 0..2N-1；坡道 3N 长，列下标 j + offset 永不越界）。
+func workFlowOff(step int) int {
+	n := workFlowN()
+	if n <= 0 {
+		return 0
+	}
+	return step % (2 * n)
+}
+
 // scrambleBlock 乱码块：N 个字符逐帧整体重掷（crush 的 cycling 区做法），
-// 亮度沿块从左到右由暗到亮（主题渐变的亮度缩放）——观感是"在漏电"。
-// 确定性：同一 (step, seed) 渲染结果一致（自检可复现）。
+// 颜色取自流光坡道的当前窗口（ramp[j+off]）——坡道每帧滑 1 格，观感是
+// 一条光 wave 扫过字符块（crush CycleColors 同款，M21 用户点菜"要渐变
+// 流光"）。鲜艳绿两端（Theme.WorkGradA/B），不做亮度缩放——坡道本身
+// 就是渐变。确定性：同一 (step, seed) 渲染结果一致（自检可复现）。
 func scrambleBlock(step, seed int) string {
 	if workScrambleN <= 0 {
 		return ""
 	}
-	base := contextBarGrad(workScrambleN)
-	den := workScrambleN - 1
-	if den < 1 {
-		den = 1
-	}
+	ramp := workRamp()
+	off := workFlowOff(step)
 	var b strings.Builder
 	for i := 0; i < workScrambleN; i++ {
 		h := (step+1)*2654435761 + (seed+i*97)*40503
@@ -61,30 +86,25 @@ func scrambleBlock(step, seed int) string {
 			h = -h
 		}
 		r := workCharset[h%len(workCharset)]
-		k := 0.5 + 0.8*float64(i)/float64(den)
-		b.WriteString(lipgloss.NewStyle().Foreground(scaleBright(base[i], k)).Render(string(r)))
+		b.WriteString(lipgloss.NewStyle().Foreground(ramp[i+off]).Render(string(r)))
 	}
 	return b.String()
 }
 
-// dotsBlock 静态省略号：字符不重掷（用户点名"不闪的点"），但每个字符按主题
-// 渐变上色（2026-09-19 用户点名"....也要跟随渐变"）——亮度曲线与乱码块
-// 一致（左暗 → 右亮），两者读起来像一条连续的渐变。确定性：同参可复现。
-func dotsBlock() string {
+// dotsBlock 静态省略号：字符不重掷（用户点名"不闪的点"），但颜色跟着
+// 流光坡道走（接在乱码块后面同一窗口，2026-09-19 用户点名"....也要跟随
+// 渐变"；M21 起连流动一起跟随）。确定性：同参可复现。
+func dotsBlock(step int) string {
 	dots := []rune(workDots)
 	n := len(dots)
 	if n == 0 {
 		return ""
 	}
-	base := contextBarGrad(n)
-	den := n - 1
-	if den < 1 {
-		den = 1
-	}
+	ramp := workRamp()
+	off := workFlowOff(step)
 	var b strings.Builder
 	for i, r := range dots {
-		k := 0.5 + 0.8*float64(i)/float64(den)
-		b.WriteString(lipgloss.NewStyle().Foreground(scaleBright(base[i], k)).Render(string(r)))
+		b.WriteString(lipgloss.NewStyle().Foreground(ramp[workScrambleN+i+off]).Render(string(r)))
 	}
 	return b.String()
 }
@@ -118,23 +138,25 @@ func (m model) workElapsed() time.Duration {
 	return time.Since(m.turnStart)
 }
 
-// tokenSpan token 段（客户端估算）：↑ = 最近一次 usage 的 used（上下文里
-// 已经发上去的量）。协议只给 used/size，拿不到精确的收发计数——所以整段
-// 带 ≈，不装精确。2026-09-19 用户反馈工作行"太挤了，尤其是 token 那里"：
-// ↓（本回合吐出字符数÷4）撤下只留 ↑；turnChars 照常累加（将来要恢复
-// 显示不用改接线）。
+// tokenSpan token 段：↑ = 最近一次 usage 的 used（上下文里已经发上去的量）。
+// 这个值是引擎 usage_update 广播的**精确值**（协议只给 used/size，拿不到
+// 收发计数——那才是估算），所以 2026-09-20 起去掉 ≈ 前缀（用户点名"不要
+// 约等于"；pi 的 extension 同样无约等号直显）。↓（本回合字符数÷4）已于
+// 2026-09-19 按"太挤了"反馈撤下；turnChars 照常累加备恢复。
 func (m model) tokenSpan() string {
 	if m.usageUsed <= 0 {
 		return ""
 	}
-	return "≈↑" + fmtK(m.usageUsed)
+	return "\u2191 " + fmtK(m.usageUsed)
 }
 
-// workingLine 工作行：乱码块 + 渐变静态点 + 状态词 + 时长 + ≈↑ token。
+// workingLine 工作行：乱码块 + 流光静态点 + 状态词 + 时长 + ↑ token，
+// 左对齐、· 连接（2026-09-20 用户反馈后回归：曾试过"四段等距分摊整行"，
+// 被点名"不是叫你拉这么大的距离，回归左对齐"——间距交给 · 分隔符）。
 // 拼装式：缺项自动跳过（没时长就不显示时长段，没 token 就不显示 token 段）。
 func (m model) workingLine() string {
 	var segs []string
-	segs = append(segs, scrambleBlock(m.blinkN, m.turnSeq)+dotsBlock())
+	segs = append(segs, scrambleBlock(m.blinkN, m.turnSeq)+dotsBlock(m.blinkN))
 	if s := m.workStateWord(); s != "" {
 		segs = append(segs, s)
 	}
@@ -175,7 +197,7 @@ func closeStyle(kind int) lipgloss.Style {
 }
 
 // workStripLines 工作区（M11）：输入栏正上方的一行"引擎在干嘛"。
-//   - 忙时（普通回合）= 工作行（乱码 + 静点 + 状态词 + 时长 + ≈token）；
+//   - 忙时（普通回合）= 工作行（乱码 + 静点 + 状态词 + 时长 + ↑token）；
 //   - 忙时（压缩回合）= 英文提示 + 定长进度条 + 百分比（见 compactProgressLine）；
 //   - 闲时 = 上一回合的收尾行（收尾语 / 压缩收据，handleTurnDone 落好）；
 //   - 都没有 → 不占行。
@@ -256,10 +278,10 @@ func closingLine(status string, d time.Duration, seq int) string {
 // -worktest：灵动工作行自检
 // ---------------------------------------------------------------------------
 
-// runWorkTest 断言 M10/M11 工作链路：乱码块（宽度 / 逐帧重掷 / 同参可复现 /
-// 亮度渐变 / 只前景色）+ 工作行拼装（乱码 + 静态点 + 状态词 + 时长 + ≈token）+
-// 收尾语分档与轮换 + 工作区集成（忙=工作行 / 闲=收尾行 / 空态不占行 /
-// 状态栏不再重复动态信息）。
+// runWorkTest 断言 M10/M11/M21 工作链路：乱码块（宽度 / 逐帧重掷 / 同参可复现 /
+// 流光坡道 / 只前景色）+ 工作行拼装（乱码 + 静态点 + 状态词 + 时长 + ↑token，
+// 左对齐 · 连接）+ 收尾语分档与轮换 + 工作区集成（忙=工作行 / 闲=收尾行 /
+// 空态不占行 / 状态栏不再重复动态信息）。
 func runWorkTest() {
 	failed := false
 	check := func(name string, cond bool) {
@@ -271,7 +293,7 @@ func runWorkTest() {
 		fmt.Printf("[%s] %s\n", tag, name)
 	}
 
-	// ① 乱码块：N 格宽、逐帧重掷、同参可复现、多色（亮度渐变）、只前景色
+	// ① 乱码块：N 格宽、逐帧重掷、同参可复现、多色（流光坡道）、只前景色
 	a0 := scrambleBlock(0, 0)
 	colors := map[string]bool{}
 	for _, c := range rgbRe.FindAllString(a0, -1) {
@@ -281,30 +303,49 @@ func runWorkTest() {
 		a0 != scrambleBlock(1, 0) &&
 		a0 == scrambleBlock(0, 0) &&
 		!hasStrayBackground(a0)
-	check("乱码块：8 格宽、逐帧重掷、同参可复现、多色（亮度渐变）、只前景色",
+	check("乱码块：8 格宽、逐帧重掷、同参可复现、多色（流光坡道）、只前景色",
 		okBlock && len(colors) >= 3)
 
-	// ② 工作行拼装：乱码 + 静态点 + 状态词 + 时长 + ≈↑ token（↓ 已撤下）
+	// ①b 流光位移：坡道每帧滑 1 格——同一列位置的颜色随帧变化（ crush
+	//    CycleColors 的核心性质；字符变化之外颜色窗口也在走）。
+	c0 := rgbRe.FindAllString(scrambleBlock(0, 0), -1)
+	c1 := rgbRe.FindAllString(scrambleBlock(1, 0), -1)
+	okFlow := len(c0) == workScrambleN && len(c1) == workScrambleN && c0[0] != c1[0]
+	check("乱码流光：坡道逐帧位移（同列位置换色）、每列各自上色", okFlow)
+
+	// ② 工作行拼装：乱码 + 静态点 + 状态词 + 时长 + ↑ token（↓ 已撤下、≈ 已去）
 	m := model{width: 110, status: stThinking, busy: true, blinkN: 3, turnSeq: 0,
 		turnStart: time.Now().Add(-12 * time.Second), usageUsed: 31800, turnChars: 1648}
 	plain := stripANSI(m.workingLine())
 	okLine := strings.Contains(plain, workDots) &&
 		strings.Contains(plain, "思考中") &&
 		strings.Contains(plain, "12s") &&
-		strings.Contains(plain, "≈↑31.8k") &&
+		strings.Contains(plain, "\u2191 31.8k") && // 2026-09-20：去 ≈（精确值直显）
+		!strings.Contains(plain, "\u2248") && // 不再有约等号
 		!strings.Contains(plain, "↓") && // 2026-09-19：token 只留 ↑
 		!hasStrayBackground(m.workingLine())
-	check("工作行：乱码+点+思考中+12s+≈↑31.8k（无↓）；只前景色", okLine)
+	check("工作行：乱码+点+思考中+12s+↑ 31.8k（无↓、无≈）；只前景色", okLine)
 
-	// ②c 静态点跟随渐变：字符不重掷（同参稳定），但多色（亮度渐变）
-	dots := dotsBlock()
+	// ②c 静态点跟随流光：字符不重掷（同参稳定），颜色随帧位移（坡道同窗口）
+	dots := dotsBlock(3)
 	dotColors := map[string]bool{}
 	for _, c := range rgbRe.FindAllString(dots, -1) {
 		dotColors[c] = true
 	}
 	okDots := lipgloss.Width(dots) == len(workDots) &&
-		dots == dotsBlock() && len(dotColors) >= 3 && !hasStrayBackground(dots)
-	check("静态点：不重掷（稳定）、跟随主题渐变（多色）、只前景色", okDots)
+		dots == dotsBlock(3) && dots != dotsBlock(4) &&
+		len(dotColors) >= 3 && !hasStrayBackground(dots)
+	check("静态点：不重掷（稳定）、跟随同一道流光（逐帧换色）、只前景色", okDots)
+
+	// ②d 左对齐回归：四段 · 连接、紧排左侧（2026-09-20 用户反馈"不是叫你
+	//     拉这么大的距离，回归左对齐"——曾试过等距分摊，当日回退）
+	mSpread := model{width: 110, status: stThinking, busy: true, blinkN: 3, turnSeq: 0,
+		turnStart: time.Now().Add(-12 * time.Second), usageUsed: 31800}
+	spreadLine := mSpread.workingLine()
+	okSpread := lipgloss.Width(spreadLine) <= mSpread.blockWidth() &&
+		strings.Contains(stripANSI(spreadLine), " \u00B7 ") && // 左对齐 · 连接
+		strings.HasPrefix(stripANSI(spreadLine), stripANSI(scrambleBlock(3, 0))) // 乱码块在行首
+	check("左对齐：四段 · 连接紧排左侧（等距分摊已回退）", okSpread)
 
 	// ②b 缺项自动跳过：没起点 / 没用量 → 只剩乱码 + 点 + 状态词
 	mBare := model{status: stReplying, busy: true, blinkN: 1}
