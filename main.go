@@ -477,6 +477,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 保证排在整段历史重放之后。
 		return m.finishLoad(msg.id, msg.title, msg.err)
 
+	case newSessionDoneMsg:
+		return m.handleNewSession(msg)
+
 	case acpClosedMsg:
 		if m.status != stEngineGone {
 			m.busy = false
@@ -879,6 +882,22 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, fetchSessions(m.client)
 	}
 
+	// M23：/new 归客户端 —— 走的不是 prompt 而是 ACP 的 session/new 请求。
+	// 把 "/new" 当 prompt 发给引擎只会换引擎自己的当前会话、不发任何通知
+	// （driver.rs 的 adopt_session），客户端再用旧 id 提问时旧会话还会被
+	// "恢复"回来（start_prompt 的 pending_resume 分支）——/new 被下一次提问
+	// 抵消。详见 newSessionAsync 的注释。
+	if isNewOnly(text) {
+		if m.busy {
+			m.feed.ScrollToBottom()
+			m.feed.Append(kSys, "回合进行中：先等它结束（或 esc 取消）再开新会话")
+			return m, nil
+		}
+		m.input.Clear()
+		m.histPush(text)
+		return m, newSessionAsync(m.client)
+	}
+
 	// M4e：命令护栏 —— 引擎必拒的形态（缺参数 / 参数越界 / 本地专有命令）
 	// 在本地用一句琥珀提示说清楚：不发引擎、不动输入框（用户接着补参数）。
 	// 连按回车不必刷屏：紧挨着的上一条是同款提示就只留一条。
@@ -989,9 +1008,19 @@ func (m model) handleTurnDone(msg turnDoneMsg) (tea.Model, tea.Cmd) {
 	m.dropElicits("回合已结束")  // 追问同理（正常情况下它们会在回合内答完）
 	switch {
 	case msg.err != nil:
-		it := m.feed.Append(kError, "回合出错："+msg.err.Error())
-		it.Detail = engineErrorHint(msg.err.Error())
-		m.status = stError
+		// 对 reasoning / model 等设置类错误：先用 engineErrorHint 获取中文提示，再替换主文案
+		errMsg := msg.err.Error()
+		hint := engineErrorHint(errMsg)
+		// 如果 hint 不为空（说明命中了推理档位/模型限制），就用中文覆盖主文案
+		if hint != "" && (strings.Contains(errMsg, "reasoning") || strings.Contains(errMsg, "rejected the session")) {
+			it := m.feed.Append(kError, "回合出错："+hint)
+			it.Detail = "" // Detail 不再重复显示同一条
+			m.status = stError
+		} else {
+			it := m.feed.Append(kError, "回合出错："+errMsg)
+			it.Detail = engineErrorHint(errMsg)
+			m.status = stError
+		}
 	case msg.reason == "cancelled":
 		if msg.forced {
 			m.feed.Append(kSys, fmt.Sprintf("取消超时 · 引擎 %v 内未结束回合，已强制收尾（如仍有残留输出请忽略）", cancelGrace))
@@ -1090,8 +1119,72 @@ func (m model) finishLoad(id, title string, err error) (tea.Model, tea.Cmd) {
 	return m, waitEvent(m.client)
 }
 
+// handleNewSession /new 的收尾（见 newSessionAsync）：应答带着新会话 id 回来，
+// 先把本地视图清成"刚开一条新会话"的样子（resetSession），再落一条回执。
+// 旧会话没丢，/resume 列表里还找得到。
+func (m model) handleNewSession(msg newSessionDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.feed.Append(kError, "新建会话失败："+msg.err.Error())
+		m.status = stError
+		return m, nil
+	}
+	m.resetSession()
+	m.syncLayout()
+	m.sessionID = msg.sid
+	if msg.sess != nil {
+		// 新会话带着引擎当前的模式与模型配置；解析口径与启动时 session/new 一致。
+		if mode := modeFromSession(msg.sess); mode != "" {
+			m.modeID = mode
+		}
+		opts := asList(msg.sess["configOptions"])
+		if label, prov := modelFromOptions(opts); label != "" {
+			m.modelLabel, m.modelProvider = label, prov
+		}
+		if r := reasoningFromOptions(opts); r != "" {
+			m.reasoning = r
+		}
+	}
+	m.status = stDone
+	m.feed.Append(kSys, "已开始新会话 "+msg.sid+"（旧会话可用 /resume 找回）")
+	return m, nil
+}
+
+// resetSession 把会话级视图状态清回"刚开一条新会话"的样子（/new 专用）：
+// 消息区、流式锚点、用量、待办、排队、收尾行全部归零。界面偏好（主题、右栏
+// 开关、todosOn）与命令表、输入历史不清——它们跟着人走，不跟着会话走。
+// turnGen 前进一格：万一有旧回合的迟到结果，会被 handleTurnDone 的 gen 守卫丢掉。
+func (m *model) resetSession() {
+	m.feed = NewFeed()
+	m.sessTitle = ""
+	m.usageUsed, m.usageSize = 0, 0
+	m.todos = nil
+	m.queue = nil
+	m.localEcho = ""
+	m.focused, m.cardNav = nil, nil
+	m.curAssistant, m.curThought = nil, nil
+	m.lastAssistant, m.lastThought = nil, nil
+	m.active, m.usageItem = nil, nil
+	m.tools = make(map[string]*FeedItem)
+	m.compactReq, m.compactSawDrop, m.compactDone = false, false, false
+	m.compactProg, m.compactReceipt = 0, ""
+	m.barPct, m.barTo, m.barAnim = 0, 0, false
+	m.turnChars, m.turnSeq = 0, 0
+	m.closeLine, m.closeKind = "", closePlain
+	m.turnStart = time.Time{}
+	m.cancelAt = time.Time{}
+	m.turnGen++
+	m.busy, m.loading = false, false
+	m.sessOn, m.sessReady, m.sessSel = false, false, 0
+	m.sessRows = nil
+	m.palHidden, m.palSel = false, 0
+	m.histOn, m.histIdx, m.histDraft = false, 0, ""
+	m.blinkOn, m.blinkN = false, 0
+	m.cursorAt = time.Time{}
+}
+
 // engineErrorHint 给引擎错误配一句"怎么办"（kError 的 Detail 行，渲染成暗色提示）。
-// 覆盖实测见过的三类：命令用法没写全、本地专有命令、会话设置被拒（推理档位等）。
+// 覆盖实测见过的几类：命令用法没写全、本地专有命令、会话设置被拒（推理档位/模型）、
+// 压缩未提交。命不中返回空串（调用方按"没有提示"处理）。
 func engineErrorHint(s string) string {
 	switch {
 	case strings.Contains(s, "Usage: /"):
@@ -1099,7 +1192,7 @@ func engineErrorHint(s string) string {
 	case strings.Contains(s, "is not available over ACP"):
 		return "这条命令是 letcode 本地 TUI 专有，ACP 模式下不可用"
 	case strings.Contains(s, "reasoning effort change"):
-		return "当前模型/供应商不接受该推理档位——可先 /model 换模型，或用 /reasoning 查看可选值"
+		return "当前模型/供应商不接受该推理档位配置 —— 可先 /model 换模型，或运行 /reasoning 查看可选值"
 	case strings.Contains(s, "could not compact"):
 		return "引擎没提交压缩（常见原因：上下文已在预算内，或另有回合占用）——可稍后再试"
 	case strings.Contains(s, "rejected the session"):

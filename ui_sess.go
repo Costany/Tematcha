@@ -60,6 +60,12 @@ func isResumeOnly(text string) bool {
 	return strings.TrimSpace(text) == "/resume"
 }
 
+// isNewOnly 输入是否正好是 /new——客户端要接管这个形态（改走 ACP 的 session/new
+// 请求；为什么不能让它当 prompt 原样发给引擎，见 newSessionAsync 的注释）。
+func isNewOnly(text string) bool {
+	return strings.TrimSpace(text) == "/new"
+}
+
 // sessStamp 把 ISO 8601 时间截成 "MM-DD HH:MM"（不是这个形状就原样返回，空了返回空）。
 func sessStamp(iso string) string {
 	if len(iso) >= 16 && iso[4] == '-' && iso[10] == 'T' {
@@ -119,6 +125,32 @@ func loadSessionAsync(c *ACPClient, id, title string) tea.Cmd {
 			Err:    err,
 		}
 		return noopMsg{}
+	}
+}
+
+// newSessionDoneMsg session/new 的应答。与 loadSessionAsync 不同：新建会话没有
+// 历史重放要排队，应答可以当普通 tea.Msg 直接返回（不必塞事件通道）。
+type newSessionDoneMsg struct {
+	sid  string
+	sess map[string]any
+	err  error
+}
+
+// newSessionAsync 让引擎开一条新会话（ACP 的 session/new）。
+//
+// 为什么不把 "/new" 当 prompt 原样发给引擎：引擎侧那条路只换它自己的当前会话、
+// 不发任何通知（driver.rs 的 adopt_session：没有 pending responder 时只写一行
+// debug 日志）；客户端还拿着旧 id 继续提问时，start_prompt 的 pending_resume
+// 分支又会把旧会话整个"恢复"回来——/new 等于被下一次提问抵消。走 session/new
+// 请求才是正路：引擎装上新会话、应答把新 id 带回来（start_session 的
+// session_issued 分支），旧会话随时可以用 /resume 找回。
+func newSessionAsync(c *ACPClient) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil {
+			return newSessionDoneMsg{err: fmt.Errorf("没有可用的引擎连接")}
+		}
+		sid, sess, err := c.NewSession(workspace)
+		return newSessionDoneMsg{sid: sid, sess: sess, err: err}
 	}
 }
 

@@ -324,6 +324,16 @@ func hintValues(hint string) []string {
 	return parts
 }
 
+// cmdValueAliases 引擎命令取值的别名表：广告 hint 里没写、但引擎解析时同样接受
+// 的取值——客户端白名单必须认账，否则会拦下引擎本来能用的形态。
+//
+// 取证（letcode src/permission.rs）：PermissionMode 的 Yolo 变体带
+// #[serde(alias = "solo")]，parse() 里 "yolo" | "solo" => Some(Self::Yolo)——
+// 所以 /permission solo 是引擎认的老叫法，护栏要放行。
+var cmdValueAliases = map[string][]string{
+	"permission": {"solo"}, // → yolo
+}
+
 // cmdGuard 客户端侧的命令护栏：拦下引擎必拒的三种形态，返回给用户看的一句话
 // （blocked=false = 放行，照常发给引擎）：
 //
@@ -333,6 +343,8 @@ func hintValues(hint string) []string {
 //
 // 本地说得清的就本地说清：不发引擎、不清输入框（用户接着补参数），
 // 省一次白跑的往返，也不用对着一条引擎错误发愣。
+// 注意：对 model/reasoning 这类模型配置命令不做参数白名单校验（引擎会自行校验），
+// 只检查是否缺参数；其余带枚举提示的命令仍按白名单拦截。
 func (m model) cmdGuard(text string) (string, bool) {
 	name, arg, ok := typedCommandName(text)
 	if !ok || name == "" {
@@ -349,7 +361,19 @@ func (m model) cmdGuard(text string) (string, bool) {
 			return "「/" + c.Name + "」还缺参数：" + c.Hint + " —— 敲 / 打开命令列表，选中回车即可补全", true
 		}
 		if vals := hintValues(c.Hint); vals != nil {
+			// model/reasoning 等模型配置命令：不拦参数值，让引擎自己校验
+			// （不同模型支持的 reasoning level/model id 不同，客户端无法预知白名单）
+			if c.Name == "model" || c.Name == "reasoning" {
+				return "", false
+			}
 			for _, v := range vals {
+				if strings.EqualFold(v, arg) {
+					return "", false
+				}
+			}
+			// 广告 hint 之外的引擎别名（见 cmdValueAliases）：拦错了反而挡住
+			// 引擎本来能用的老叫法（真机踩过：/permission solo 被本地拦下）。
+			for _, v := range cmdValueAliases[c.Name] {
 				if strings.EqualFold(v, arg) {
 					return "", false
 				}
@@ -643,15 +667,25 @@ func runCmdTest() {
 			strings.Contains(msg, "off|none|minimal|low|medium|high|xhigh")
 		msg, blocked = gm.cmdGuard("/permission plan")
 		okBadVal := blocked && strings.Contains(msg, "没有 plan 这个取值") && strings.Contains(msg, "safe|default|auto|yolo")
-		_, okGoodVal := gm.cmdGuard("/reasoning high")
-		_, okResumeID := gm.cmdGuard("/resume 1789672451669-37748-0")
-		_, okNoArg := gm.cmdGuard("/compact")
+		// model/reasoning 等模型配置命令：参数透传，不拦（不同模型的白名单客户端
+		// 无从预知——引擎自己校验；拦错了反而挡住合法取值）
+		_, blockedHigh := gm.cmdGuard("/reasoning high")
+		_, blockedInvalid := gm.cmdGuard("/reasoning invalid_val")         // 透传任意值
+		_, blockedModel := gm.cmdGuard("/model test/model")                // 透传非真实模型 ID
+		_, blockedResumeID := gm.cmdGuard("/resume 1789672451669-37748-0") // 带参数的合法命令
+		_, blockedCompact := gm.cmdGuard("/compact")
+		// 引擎别名（permission.rs 的 serde alias）：solo 是 yolo 的老叫法，得放行；
+		// plan 不在引擎取值表里，仍拦
+		_, blockedSolo := gm.cmdGuard("/permission solo")
+		_, blockedPlan := gm.cmdGuard("/permission plan")
 		msg, blocked = gm.cmdGuard("/context")
 		okLocal := blocked && strings.Contains(msg, "ACP")
-		_, okUnknown := gm.cmdGuard("/notacommand")
-		_, okChat := gm.cmdGuard("解释一下这段代码")
-		check("护栏：缺参数 / 参数越界 / 本地专有命令被拦；合法命令与普通文本放行",
-			okBare && okBadVal && okLocal && !okGoodVal && !okResumeID && !okNoArg && !okUnknown && !okChat)
+		_, blockedUnknown := gm.cmdGuard("/notacommand")
+		_, blockedChat := gm.cmdGuard("解释一下这段代码")
+		check("护栏：缺参数 / 参数越界 / 本地专有命令被拦；合法命令、模型配置命令、引擎别名与普通文本放行",
+			okBare && okBadVal && okLocal && blockedPlan &&
+				!blockedHigh && !blockedInvalid && !blockedModel && !blockedResumeID &&
+				!blockedCompact && !blockedSolo && !blockedUnknown && !blockedChat)
 		fmt.Printf("  护栏样张（拦下的话长这样）：%s\n", msg)
 
 		// submit 走护栏：不发引擎、不清输入框、消息区落一条 kWarn 琥珀提示；
@@ -667,6 +701,60 @@ func runCmdTest() {
 		nextS, _ = sm.submit()
 		sm = nextS.(model)
 		check("护栏去重：连按回车只留一条同款提示（feed 仍是 1 条）", sm.feed.Len() == 1)
+	}
+
+	// ⑪ engineErrorHint：引擎错误配的"怎么办"提示（渲染成 kError 的 Detail 行）。
+	{
+		okUsage := strings.Contains(engineErrorHint("Usage: /permission safe|default|auto|yolo"), "敲 /")
+		okAcess := strings.Contains(engineErrorHint("/theme is not available over ACP"), "本地 TUI 专有")
+		okReason := strings.Contains(engineErrorHint("agent rejected the session reasoning effort change"), "推理档位")
+		okCompact := strings.Contains(engineErrorHint("letcode could not compact the session context: context is already within budget"), "压缩")
+		okSession := strings.Contains(engineErrorHint("agent rejected the session model change"), "会话设置")
+		okNone := engineErrorHint("some unknown engine error") == ""
+		check("engineErrorHint：五类翻译各就各位，未知错误返回空（不瞎猜）",
+			okUsage && okAcess && okReason && okCompact && okSession && okNone)
+	}
+
+	// ⑫ M23 /new：形态识别 + 回合中护栏 + 路由到 session/new + 成功重置 / 失败落错。
+	{
+		okOnly := isNewOnly("/new") && isNewOnly("  /new ") &&
+			!isNewOnly("/new abc") && !isNewOnly("/newx") && !isNewOnly("new")
+		check("/new 形态：只认整句 /new（带参数、近似词、裸词都不接管）", okOnly)
+
+		bsN := model{width: 100, feed: NewFeed(), status: stIdle, busy: true}
+		bsN.input.SetText("/new")
+		nextB, cmdB := bsN.submit()
+		bsN = nextB.(model)
+		check("/new 护栏：回合进行中拦下（不发命令、输入保留、落一条提示）",
+			cmdB == nil && bsN.feed.Len() == 1 && bsN.feed.items[0].Kind == kSys &&
+				strings.Contains(bsN.feed.items[0].Text, "回合进行中") && bsN.input.Text() == "/new")
+
+		okN := model{width: 100, height: 30, feed: NewFeed(), status: stIdle,
+			sessionID: "old-0000", sessTitle: "旧标题", usageUsed: 4096, usageSize: 200000,
+			todos: []TodoEntry{{Content: "旧待办", Status: "pending"}}}
+		okN.input.SetText("/new")
+		nextN, cmdN := okN.submit()
+		okN = nextN.(model)
+		okRoute := cmdN != nil && okN.input.Text() == "" && len(okN.sent) == 1 && okN.sent[0] == "/new"
+		evN, _ := cmdN().(newSessionDoneMsg)
+		check("/new 路由：submit 交回 session/new 的异步命令（无引擎连接时给出错误事件）",
+			okRoute && evN.err != nil)
+
+		// 成功路径：直接喂一条合成应答（新建会话没有历史重放，普通 tea.Msg 即可）
+		okN2, _ := okN.handleNewSession(newSessionDoneMsg{sid: "new-1111-2222-3333"})
+		okN = okN2.(model)
+		okReset := okN.sessionID == "new-1111-2222-3333" && okN.sessTitle == "" &&
+			okN.usageUsed == 0 && okN.usageSize == 0 && len(okN.todos) == 0 &&
+			okN.feed.Len() == 1 && okN.feed.items[0].Kind == kSys &&
+			strings.Contains(okN.feed.items[0].Text, "已开始新会话") && okN.status == stDone
+		check("/new 收尾：应答重置会话状态（标题/用量/待办清空）并落回执", okReset)
+
+		// 失败路径：错误落屏、状态置错，既有内容不被动过
+		failN2, _ := okN.handleNewSession(newSessionDoneMsg{err: fmt.Errorf("没有可用的引擎连接")})
+		failN := failN2.(model)
+		check("/new 失败：错误落屏 + 状态置错",
+			failN.status == stError && failN.feed.Len() == 2 && failN.feed.items[1].Kind == kError &&
+				strings.Contains(failN.feed.items[1].Text, "新建会话失败"))
 	}
 
 	if failed {
