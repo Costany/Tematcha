@@ -214,10 +214,6 @@ func (m *model) settlePermCancelled(p *PermRequest) {
 // syncLayout 按面板高度重算消息区高度：面板占几行、消息区就矮几行，
 // 整屏行数恒定（面板钉在输入区上方、随内容上推，不悬浮遮挡）。
 func (m *model) syncLayout() {
-	panelH := len(m.renderPermPanel(m.width))
-	elicitH := len(m.renderElicitPanel(m.width)) // M5a：追问表单也钉在输入区上方
-	cmdH := len(m.renderCmdPalette())            // M4b：命令弹层也钉在输入区上方，一起让位
-	sessH := len(m.renderSessionPicker())        // M4d：会话选择列表同理
 	// 右栏（M3b）显示时，消息区宽度让位（分隔列 + 右栏内容）
 	w := m.width - 6
 	if m.panelVisible() {
@@ -226,12 +222,21 @@ func (m *model) syncLayout() {
 	if w < 30 {
 		w = 30
 	}
+	// M20：底部区块（输入框/弹层/面板）的宽度预算依赖消息区宽——先把宽度
+	// 落定，再量各面板高度（否则弹层/面板按旧宽度量高，resize 后会差一帧）。
+	m.feed.SetSize(w, m.feed.height)
+	panelH := len(m.renderPermPanel(m.bottomW()))
+	elicitH := len(m.renderElicitPanel(m.bottomW())) // M5a：追问表单也钉在输入区上方
+	cmdH := len(m.renderCmdPalette())                // M4b：命令弹层也钉在输入区上方，一起让位
+	sessH := len(m.renderSessionPicker())            // M4d：会话选择列表同理
 	// M5b：钉面板（# Todos）钉在消息区顶部、不参与滚动——占几行就扣几行。
 	// 先定宽度再算它（渲染器要宽度参数；行数只由待办条数决定，顺序别反）。
 	todosH := len(m.renderTodosPinned(w))
 	// M11：工作区（输入栏上方的一行：工作行 / 压缩进度条 / 收尾行）也占高度。
 	workH := len(m.workStripLines())
-	h := m.height - 6 - workH - panelH - elicitH - cmdH - sessH - todosH
+	// 底部固定行 = 顶部空白 1 + 消息区后空白 1 + 输入区 3（两线一行）+ 状态栏
+	// 信息行 1 + 快捷键提示行 1 = 7（2026-09-20 提示行从状态栏拆出，6 → 7）。
+	h := m.height - 7 - workH - panelH - elicitH - cmdH - sessH - todosH
 	if h < 3 {
 		h = 3
 	}

@@ -346,7 +346,12 @@ func runWorkTest() {
 	bar := stripANSI(m2.renderStatusBar())
 	okBar := !strings.Contains(bar, workDots) && !strings.Contains(bar, "思考中") &&
 		lipgloss.Width(m2.renderStatusBar()) == 110
-	check("状态栏撤下工作行（动态信息只留在工作区）", okBar)
+	// 2026-09-20：快捷键提示独立成行（renderHintBar）——宽度守恒、内容不掺动态信息
+	hint := stripANSI(m2.renderHintBar())
+	okHint := lipgloss.Width(m2.renderHintBar()) == 110 &&
+		!strings.Contains(hint, workDots) && !strings.Contains(hint, "思考中") &&
+		strings.Contains(hint, "ctrl+c")
+	check("状态栏撤下工作行（动态信息只留在工作区）", okBar && okHint)
 
 	// 样张（人眼核对）
 	fmt.Printf("  工作行样张：%s\n", stripANSI(m2.workingLine()))

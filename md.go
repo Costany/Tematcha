@@ -50,9 +50,10 @@ func transparentDarkStyle() ansi.StyleConfig {
 	s.H1.Suffix = ""
 
 	s.Code.BackgroundColor = nil // 行内代码去底色
-	// 行内代码颜色：主题 Code（sprout = 低饱和鼠尾草绿 #8FBF9F）。
+	// 行内代码颜色：主题 Code（sprout = 鲜艳绿 #29B72D）。
 	// 2026-09-19 用户反馈"绿色也晃眼睛"——此前用强调绿 Accent（#4EE05E，
-	// 与用户竖条同色），那个亮度给小面积竖条正好、给行内文字太刺，换柔的。
+	// 与用户竖条同色），那个亮度给小面积竖条正好、给行内文字太刺；同日两轮
+	// 反馈后定稿 #29B72D（"纯度太低了"→ 调鲜艳）。
 	s.Code.Color = sptr(activeTheme.Code)
 
 	// M6 全量主题化：标题 / 链接 / 斜体接入主题（此前只有行内代码与粗体）。
@@ -275,16 +276,16 @@ func runMDTest() {
 	}
 
 	// 防晃眼检查（2026-09-19 用户反馈"晃眼""加粗巨晃，白色晃""绿色也晃眼睛"）：
-	// 正文接主题 Text（#D0D0D0 = 208;208;208）、粗体柔白 Strong（#D9E7D7 =
-	// 236;235;240，charmtone Sash）、行内代码低饱和鼠尾草绿 Code（#8FBF9F =
-	// 143;191;159）；且整篇不得出现纯白 #FFFFFF（255;255;255）——纯白加粗与
-	// 亮绿行内文字正是晃眼根源（取证见规格 §15 ㊺）。
+	// 正文接主题 Text（#D0D0D0 = 208;208;208）、粗体低纯度绿白 Strong
+	// （#D9E7D7 = 217;231;215）、行内代码鲜艳绿 Code（#29B72D = 41;183;45）；
+	// 且整篇不得出现纯白 #FFFFFF（255;255;255）——纯白加粗正是晃眼根源
+	// （取证见规格 §15 ㊺）。
 	antiGlare := strings.Contains(out, "38;2;208;208;208") &&
 		strings.Contains(out, "38;2;217;231;215") &&
-		strings.Contains(out, "38;2;143;191;159") &&
+		strings.Contains(out, "38;2;41;183;45") &&
 		!strings.Contains(out, "38;2;255;255;255")
 	if antiGlare {
-		fmt.Println("OK 防晃眼检查：正文/柔白粗体/柔绿行内代码在场，纯白缺席")
+		fmt.Println("OK 防晃眼检查：正文/绿白粗体/鲜艳绿行内代码在场，纯白缺席")
 	} else {
 		okAll = false
 		fmt.Println("!! 防晃眼检查：正文/粗体/行内代码配色不符预期，或出现纯白")

@@ -50,20 +50,31 @@ type Theme struct {
 	Rule        string // 细线（输入区框线、进度条空槽）
 	Placeholder string // 占位提示
 	Track       string // 滚动条轨道
+	ScrollThumb string // 滚动条拇指（消息区 / 右栏共用；2026-09-19 用户点名用「体绿」）
 
 	// 强调与状态
-	Accent    string // 小面积强调绿（用户竖条 / 行内代码 / 滚动条拇指 / 回执）
-	OK        string // 成功（工具柔绿）
-	Err       string // 失败（工具柔红）
-	ErrSoft   string // 错误块（柔红 + bold）
-	ErrBadge  string // 错误徽章 ERROR 的底色（低饱和红；全应用唯一一处铺底色，§0.5 例外）
-	Warn      string // 提醒（思考中 / 排队 / 需要批准）
-	Reply     string // 回复中
-	PromptOff string // 输入提示符（空输入）
-	PromptOn  string // 输入提示符（打字后）
+	Accent     string // 小面积强调绿（用户竖条 / 行内代码 / 滚动条拇指 / 回执）
+	OK         string // 成功（工具柔绿）
+	Err        string // 失败（工具柔红）
+	ErrSoft    string // 错误块（柔红 + bold）
+	ErrBadge   string // 错误徽章 ERROR 的底色（鲜艳玫红；全应用唯一一处铺底色，§0.5 例外）
+	PanelLabel string // 右栏字段标签（标识 / 模型 / 模式 / 上下文 / LSPs / MCPs / skills）
+	// 右栏字段值（2026-09-19 用户点菜：加粗 + 按经典绿恐龙吉祥物的三色赋值——
+	// 体绿 / 鞋橙 / 鞍红；肚皮白不用）。mono 下退化为三级灰。
+	PanelValID    string // 值·标识（session id）
+	PanelValModel string // 值·模型名
+	PanelValMode  string // 值·模式
+	Warn          string // 提醒（思考中 / 排队 / 需要批准）
+	Reply         string // 回复中
+	PromptOff     string // 输入提示符（空输入）
+	PromptOn      string // 输入提示符（打字后）
 
 	// 柔绿渐变锚点（§11.5：A 青柠黄绿 → B 草绿 → C 深植绿）
 	GradA, GradB, GradC string
+
+	// 品牌渐变锚点（§11.5：A 翠绿 → B 素白 → C 暖橙）。
+	// 只用于右栏顶部品牌行（逐字符取色）；mono 下退化为灰阶。
+	BrandA, BrandB, BrandC string
 }
 
 // sproutTheme 内置默认主题：翠绿（2026-09-19 定调，只求"绿绿的"清新观感，
@@ -75,12 +86,15 @@ var sproutTheme = Theme{
 
 	Text: "#D0D0D0", TextHi: "#E6E6E6", Faint: "#8F8F8F", Dim: "#6E6E6E", Strong: "#D9E7D7",
 	Tool: "#9A9A9A", ThoughtPre: "#8A8A8A", ThoughtTtl: "#B4B4B4",
-	Rule: "#3E5340", Placeholder: "#5A6A5A", Track: "#3A4A3C",
-	Accent: "#4EE05E", OK: "#8CE28A", Err: "#C97B7B", ErrSoft: "#D98A8A", ErrBadge: "#AC5A5E",
+	Rule: "#3E5340", Placeholder: "#5A6A5A", Track: "#3A4A3C", ScrollThumb: "#5AC54F",
+	Accent: "#4EE05E", OK: "#8CE28A", Err: "#C97B7B", ErrSoft: "#D98A8A", ErrBadge: "#FE2D6D",
+	PanelLabel: "#6E6E6E",
+	PanelValID: "#5AC54F", PanelValModel: "#F88F00", PanelValMode: "#E03A3A",
 	Warn: "#F5A25C", Reply: "#7CC8F8", PromptOff: "#4E5E4E", PromptOn: "#3FCF52",
-	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC", Code: "#8FBF9F",
+	Heading: "#EFF7EA", Link: "#7CC8F8", Emph: "#C2D2BC", Code: "#29B72D",
 
 	GradA: "#C8F5A0", GradB: "#5FCC6E", GradC: "#2F7D46",
+	BrandA: "#5AC54F", BrandB: "#F5F5F0", BrandC: "#F5A623",
 }
 
 // monoTheme 灰度主题：全部无色相（R=G=B）。
@@ -92,12 +106,15 @@ var monoTheme = Theme{
 
 	Text: "#D0D0D0", TextHi: "#F2F2F2", Faint: "#969696", Dim: "#6E6E6E", Strong: "#F0F0F0",
 	Tool: "#9A9A9A", ThoughtPre: "#8A8A8A", ThoughtTtl: "#B4B4B4",
-	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C",
+	Rule: "#464646", Placeholder: "#565656", Track: "#3C3C3C", ScrollThumb: "#D0D0D0",
 	Accent: "#E8E8E8", OK: "#C8C8C8", Err: "#A8A8A8", ErrSoft: "#D8D8D8", ErrBadge: "#8C8C8C",
+	PanelLabel: "#6E6E6E",
+	PanelValID: "#C8C8C8", PanelValModel: "#B0B0B0", PanelValMode: "#A8A8A8",
 	Warn: "#DDDDDD", Reply: "#C4C4C4", PromptOff: "#4A4A4A", PromptOn: "#D0D0D0",
 	Heading: "#F2F2F2", Link: "#C4C4C4", Emph: "#B0B0B0", Code: "#B0B0B0",
 
 	GradA: "#F0F0F0", GradB: "#C8C8C8", GradC: "#8C8C8C",
+	BrandA: "#F0F0F0", BrandB: "#C8C8C8", BrandC: "#8C8C8C",
 }
 
 var (
@@ -158,10 +175,16 @@ func applyTheme(t Theme) {
 	toolOutStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Faint))
 	dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Dim))
 	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.ErrSoft)).Bold(true)
-	// 错误徽章（2026-09-19 用户点菜，照 crush）：白字 + 低饱和红底小方块。
+	// 错误徽章（2026-09-19 用户点菜，照 crush）：白字 + 红底小方块。
 	// 这是全应用唯一一处铺底色——§0.5 的透明度原则在此让位给错误的辨识度
 	// （徽章只 7 格，不是大块底色；mono 主题下退化为灰底）。
 	errBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color(t.ErrBadge)).Bold(true)
+	// 右栏字段标签（2026-09-19 用户点菜：从紫色改回灰色，与次要信息同档）。
+	panelLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.PanelLabel))
+	// 右栏字段值（2026-09-19 用户点菜：加粗 + 按经典绿恐龙吉祥物的三色赋值）
+	panelValIDStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.PanelValID)).Bold(true)
+	panelValModelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.PanelValModel)).Bold(true)
+	panelValModeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.PanelValMode)).Bold(true)
 
 	// 输入区 / 状态栏
 	ruleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Rule))
@@ -175,7 +198,7 @@ func applyTheme(t Theme) {
 	promptOnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.PromptOn))
 
 	// 滚动条（M4a）
-	scrollThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Accent))
+	scrollThumbStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.ScrollThumb))
 	scrollTrackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(t.Track))
 	// glamour 渲染器必须重建：每台的样式表是构造时烤进去的（md.go 的
 	// transparentDarkStyle 读 activeTheme 取 Code/Strong 色）。
@@ -211,6 +234,41 @@ func contextBarGrad(n int) []color.Color {
 		lipgloss.Color(activeTheme.GradC))
 	gradCacheName = activeTheme.Name
 	return gradCache
+}
+
+var (
+	brandCacheName string
+	brandCache     []color.Color
+)
+
+// brandGrad 取 n 格品牌渐变（A → B → C，CIELAB 混合）。按主题名缓存。
+// 与 contextBarGrad 分开一套缓存：锚点不同（见 Theme.BrandA/BrandC）。
+func brandGrad(n int) []color.Color {
+	if brandCacheName == activeTheme.Name && len(brandCache) == n {
+		return brandCache
+	}
+	brandCache = lipgloss.Blend1D(n,
+		lipgloss.Color(activeTheme.BrandA),
+		lipgloss.Color(activeTheme.BrandB),
+		lipgloss.Color(activeTheme.BrandC))
+	brandCacheName = activeTheme.Name
+	return brandCache
+}
+
+// brandText 右栏顶部品牌行：逐字符取品牌渐变色（§11.5）。
+// 文字 = "Letcode - Tematcha"（2026-09-19 用户点名；此前只有 letcode 一个词）。
+// 确定性：同参可复现（渐变只由主题与字符数决定）。
+func brandText(s string) string {
+	rs := []rune(s)
+	if len(rs) == 0 {
+		return ""
+	}
+	grad := brandGrad(len(rs))
+	var b strings.Builder
+	for i, r := range rs {
+		b.WriteString(lipgloss.NewStyle().Foreground(grad[i]).Render(string(r)))
+	}
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +323,7 @@ func themeSample() string {
 	m.syncLayout()
 
 	b.WriteString(m.renderStatusBar() + "\n")
+	b.WriteString(m.renderHintBar() + "\n") // 2026-09-20：快捷键提示独立成行
 	b.WriteString(m.renderInputBlock() + "\n")
 	m.input.SetText("打字中的输入")
 	b.WriteString(m.renderInputBlock() + "\n")
@@ -399,7 +458,7 @@ func runThemeTest() {
 	}
 	okGlareSprout := strings.Contains(glareOut, "38;2;208;208;208") && // 正文 Text #D0D0D0
 		strings.Contains(glareOut, "38;2;217;231;215") && // 粗体 Strong #D9E7D7
-		strings.Contains(glareOut, "38;2;143;191;159") && // 行内代码 Code #8FBF9F
+		strings.Contains(glareOut, "38;2;41;183;45") && // 行内代码 Code #29B72D
 		!strings.Contains(glareOut, "38;2;255;255;255") // 纯白缺席
 	applyTheme(monoTheme)
 	glareMono := ""

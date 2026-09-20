@@ -302,6 +302,7 @@ type model struct {
 	sessTitle string
 	todos     []TodoEntry
 	panelOn   bool
+	panelOff  int // M17：右栏竖向滚动偏移（距顶行数；0 = 贴顶）
 
 	// M5b 钉面板（§5）：todosOn = 消息区顶部「# Todos」是否展开（/todos 开关）。
 	todosOn bool
@@ -495,6 +496,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleClick(msg)
 
 	case tea.MouseWheelMsg:
+		// 滚轮分区（M17）：鼠标在右栏区域 → 滚右栏（竖向）；否则滚消息区。
+		// 右栏起点 = 消息区宽 + 消息区滚动条列 + 分隔列。
+		if m.panelVisible() && msg.X >= m.feed.width+scrollBarW+panelSepW {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				if m.panelOff > 0 {
+					m.panelOff -= 3
+				}
+			case tea.MouseWheelDown:
+				m.panelOff += 3
+			}
+			return m, nil
+		}
 		switch msg.Button {
 		case tea.MouseWheelUp:
 			m.feed.ScrollBy(3)
@@ -736,7 +750,7 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		// 弹层首行的屏幕行号：顶部留白 + 消息块（钉面板+消息行，总高不变）+ 空行
 		// + 权限面板 + 追问面板（2026-09-19 补算：此前漏了追问面板高度）
 		palTop := 1 + len(m.renderTodosPinned(m.feed.width)) + m.feed.normH() + 1 +
-			len(m.renderPermPanel(m.width)) + len(m.renderElicitPanel(m.width))
+			len(m.renderPermPanel(m.bottomW())) + len(m.renderElicitPanel(m.bottomW()))
 		if msg.Y >= palTop {
 			if ci, ok := m.palRowAt(msg.Y - palTop); ok {
 				c := m.cmds[ci]
@@ -1646,73 +1660,118 @@ func (m model) View() tea.View {
 	left := make([]string, 0, len(pinned)+len(feedLines))
 	left = append(left, feedLines...)
 	left = append(left, pinned...)
-	var panelLines []string
-	if m.panelVisible() {
-		panelLines = m.renderPanel(len(left))
-	}
-	for i, ln := range left {
-		// 兜底：渲染器已各自按预算折行；万一有一行超宽，右缘的滚动条列
-		// 与右栏会被"顶着"往右挪（截图上就是"右侧顶出去了"）。
-		if lipgloss.Width(ln) > m.feed.width {
-			ln = clipLine(ln, m.feed.width)
-		}
-		b := ""
-		// 钉面板在底部后消息行在前：滚动条只跟消息行对齐（钉面板行不画条）
-		if i < len(bar) {
-			b = bar[i]
-		}
-		// 该行要画条（或右栏在那儿等着）时才补空格对齐：滚动条钉在消息区右缘
-		if b != "" || panelLines != nil {
-			if pad := m.feed.width - lipgloss.Width(ln); pad > 0 {
-				ln += strings.Repeat(" ", pad)
-			}
-		}
-		if b != "" {
-			ln += b
-		} else if panelLines != nil {
-			ln += " " // 保留滚动条列：右栏不因条的出现/消失而横移
-		}
-		if panelLines != nil {
-			ln += "  " + ruleStyle.Render("\u2502") + " " + panelLines[i]
-		}
-		sb.WriteString(ln + "\n")
-	}
-	sb.WriteString("\n")
 
-	// ② 权限面板（有请求时钉在输入区上方；高度已从消息区扣出）
-	for _, ln := range m.renderPermPanel(m.width) {
-		sb.WriteString(ln + "\n")
+	// ② 底部区块（2026-09-20 用户点菜「输入框不要沾满整个终端的宽度，右边的
+	// 侧边栏要截断他」）：权限/追问/命令弹层/会话列表 + 工作区 + 输入区。
+	// 右栏可见时整块只占左列宽（bottomW），右栏列一路延伸到底（照 crush：
+	// 侧栏全高，editor 宽 = 屏宽 - 侧栏宽；只有状态栏/提示行才满宽）。
+	bottom := []string{""} // 消息区与底部之间的间隔空行
+	for _, ln := range m.renderPermPanel(m.bottomW()) {
+		bottom = append(bottom, ln)
 	}
-
 	// ②.2 追问面板（M5a · elicitation/create）：同一个钉子位；行数已在
 	// syncLayout 里从消息区扣出。真机教训（2026-09-18）：这里漏拼装时布局
 	// 仍会扣高度 —— 面板隐形、键盘却被接管（esc 被吃成 decline，引擎收到
 	// "用户拒绝回答"）。新增面板必须同时过 syncLayout 与 View 两关。
-	for _, ln := range m.renderElicitPanel(m.width) {
-		sb.WriteString(ln + "\n")
+	for _, ln := range m.renderElicitPanel(m.bottomW()) {
+		bottom = append(bottom, ln)
 	}
-
 	// ②.5 命令弹层（M4b · §7）：同样的钉子位；行数已在 syncLayout 里从消息区扣出
 	for _, ln := range m.renderCmdPalette() {
-		sb.WriteString(ln + "\n")
+		bottom = append(bottom, ln)
 	}
-
 	// ②.6 会话选择列表（M4d · /resume）：同一个钉子位
 	for _, ln := range m.renderSessionPicker() {
-		sb.WriteString(ln + "\n")
+		bottom = append(bottom, ln)
 	}
-
 	// ②.7 工作区（M11 · §11.6）：输入栏正上方的一行——忙时工作行 / 压缩进度条，
 	// 闲时上一回合的收尾行；行数已在 syncLayout 里从消息区扣出。
 	for _, ln := range m.workStripLines() {
+		bottom = append(bottom, ln)
+	}
+	// ③ 输入区（上下细线 + 输入行）
+	for _, ln := range strings.Split(m.renderInputBlock(), "\n") {
+		bottom = append(bottom, ln)
+	}
+
+	// 左列全部行（消息 + 底部区块）——右栏高度跟着它走
+	all := make([]string, 0, len(left)+len(bottom))
+	all = append(all, left...)
+	all = append(all, bottom...)
+
+	var panelLines []string
+	if m.panelVisible() {
+		panelLines = m.renderPanel(len(all))
+		// M17：右栏竖向滚动条——内容超出可视高度时按 panelOff 开窗，
+		// 最右 1 列画条（内容宽已让出 1 格 = panelContentW，总宽守恒）。
+		if len(panelLines) > len(all) {
+			if max := panelScrollMax(panelLines, len(all)); m.panelOff > max {
+				m.panelOff = max
+			}
+			off := m.panelOff
+			if off < 0 {
+				off = 0
+			}
+			panelLines = panelLines[off : off+len(all)]
+		} else {
+			m.panelOff = 0
+		}
+	}
+	pbar := panelScrollbar(panelLines, len(all), m.panelOff)
+	for i, ln := range all {
+		isFeed := i < len(left)
+		if m.panelVisible() {
+			// 兜底：渲染器已各自按预算折行；万一有一行超宽，右缘的滚动条列
+			// 与右栏会被"顶着"往右挪（截图上就是"右侧顶出去了"）。
+			if isFeed {
+				if lipgloss.Width(ln) > m.feed.width {
+					ln = clipLine(ln, m.feed.width)
+				}
+				if pad := m.feed.width - lipgloss.Width(ln); pad > 0 {
+					ln += strings.Repeat(" ", pad)
+				}
+				// 钉面板在底部后消息行在前：滚动条只跟消息行对齐（钉面板行不画条）
+				b := ""
+				if i < len(bar) {
+					b = bar[i]
+				}
+				if b != "" {
+					ln += b
+				} else {
+					ln += " " // 保留滚动条列：右栏不因条的出现/消失而横移
+				}
+			} else {
+				// 底部区块行：补到左列总宽（消息区宽 + 滚动条列位，留空）
+				if lipgloss.Width(ln) > m.feed.width+scrollBarW {
+					ln = clipLine(ln, m.feed.width+scrollBarW)
+				}
+				if pad := m.feed.width + scrollBarW - lipgloss.Width(ln); pad > 0 {
+					ln += strings.Repeat(" ", pad)
+				}
+			}
+			ln += "  " + ruleStyle.Render("│") + " " + panelLines[i] + pbar[i]
+		} else if isFeed {
+			// 右栏隐藏：消息区行照旧（滚动条列只在内容溢出时出现）
+			if lipgloss.Width(ln) > m.feed.width {
+				ln = clipLine(ln, m.feed.width)
+			}
+			b := ""
+			if i < len(bar) {
+				b = bar[i]
+			}
+			if b != "" {
+				if pad := m.feed.width - lipgloss.Width(ln); pad > 0 {
+					ln += strings.Repeat(" ", pad)
+				}
+				ln += b
+			}
+		}
 		sb.WriteString(ln + "\n")
 	}
 
-	// ③ 输入区（上下细线 + 输入行）
-	sb.WriteString(m.renderInputBlock() + "\n")
-
-	// ③ 状态栏
+	// ③.5 状态栏（信息行）+ ③.6 快捷键提示行（M19：独立成行；满宽，照 crush 的 help 行）
 	sb.WriteString(m.renderStatusBar() + "\n")
+	sb.WriteString(m.renderHintBar() + "\n")
 
 	v := tea.NewView(sb.String())
 	v.AltScreen = true                    // 全屏模式：退出自动还原终端

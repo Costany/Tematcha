@@ -100,9 +100,25 @@ func (ib *InputBar) HandleKey(k tea.KeyPressMsg) (handled, submit, cancel bool) 
 // 布局尺寸
 // ---------------------------------------------------------------------------
 
+// bottomW 底部区块（输入框 / 命令弹层 / 会话列表 / 权限·追问面板 / 工作区）
+// 的可用宽度：右栏可见时 = 消息区宽 + 右缘滚动条列（左列总宽）——右栏列
+// （分隔 + 面板）不参与，一路延伸到底（照 crush：editor 宽 = 屏宽 - 侧栏宽，
+// 侧栏是全高的）；右栏隐藏时满宽（m.width）。syncLayout 与 View 共用同一口径。
+func (m model) bottomW() int {
+	if m.panelVisible() {
+		return m.feed.width + scrollBarW
+	}
+	return m.width
+}
+
 // blockWidth 输入区总宽度（左右各留 2 格呼吸空间）。
+// 2026-09-20 用户点菜「输入框不要沾满整个终端的宽度，右边的侧边栏要截断他」：
+// 右栏可见时只占左列（bottomW - 2 格缩进），输入框被侧边栏截断。
 func (m model) blockWidth() int {
 	w := m.width - 4
+	if m.panelVisible() {
+		w = m.bottomW() - 2
+	}
 	if w < 20 {
 		w = 20
 	}
@@ -218,22 +234,39 @@ func (m model) horizontalWindow() (pre, at, post string) {
 // 状态栏
 // ---------------------------------------------------------------------------
 
-// renderStatusBar 底部状态栏：左 = 引擎状态 +「模式徽章 | 上下文条 | 模型」，
-// 右 = 快捷键提示（右对齐）。窄屏时左侧从尾部丢段（模型 → 上下文条 → 模式徽章）。
+// renderStatusBar 底部状态栏（信息行）：左 = 引擎状态 +「模式徽章 | 上下文条 | 模型」，
+// 右侧补空对齐。窄屏时左侧从尾部丢段（模型 → 上下文条 → 模式徽章）。
+// 2026-09-20：快捷键提示拆去独立的下一行（renderHintBar）——用户点菜「快捷键跟
+// 输入框以及他的信息分开」（输入框是操作区，提示行不再与信息段挤同一行）。
 // 2026-09-19：letcode 品牌字样挪到右栏上方（照 crush），状态栏不再带前缀。
 func (m model) renderStatusBar() string {
-	right := dimStyle.Render(m.hintText())
-
-	// 左段预算：总宽 - 左右边距 - 右段 - 至少 1 格间隙
-	budget := m.width - 4 - lipgloss.Width(right) - 1
 	// M11：忙时引擎状态段为空（动态信息在工作区）——左侧为空时整段留白。
-	left := m.statusLeft(budget)
+	left := m.statusLeft(m.width - 4)
 
-	pad := m.width - 4 - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
+	pad := m.width - 4 - lipgloss.Width(left)
+	if pad < 0 {
+		pad = 0
 	}
-	return "  " + left + strings.Repeat(" ", pad) + right + "  "
+	return "  " + left + strings.Repeat(" ", pad) + "  "
+}
+
+// renderHintBar 底部快捷键提示行（2026-09-20 用户点菜：与状态栏信息段拆成两行）：
+// 右对齐、暗色；内容随忙闲 / 权限面板 / 选择态切换（hintText）。
+// 宽度守恒：2 + pad + right + 2 = width——行高恒定，不随内容"呼吸"。
+func (m model) renderHintBar() string {
+	right := dimStyle.Render(m.hintText())
+	max := m.width - 4
+	if max < 8 {
+		max = 8
+	}
+	if lipgloss.Width(right) > max { // 极窄屏兜底：提示截断也不顶破右缘
+		right = clipLine(right, max)
+	}
+	pad := max - lipgloss.Width(right)
+	if pad < 0 {
+		pad = 0
+	}
+	return "  " + strings.Repeat(" ", pad) + right + "  "
 }
 
 // statusLeft 状态栏左侧内容（M3）：模态（权限/选择态）优先；
@@ -400,8 +433,20 @@ func runStatusTest() {
 			tag += " BG!"
 			bad = true
 		}
+		// 2026-09-20：快捷键提示独立成行（renderHintBar）——宽度同样必须等于
+		// 终端宽（超宽会把右缘顶出去），且不带底色。
+		hint := mm.renderHintBar()
+		if lipgloss.Width(hint) != c.w {
+			tag += " HINTW!"
+			bad = true
+		}
+		if hasStrayBackground(hint) {
+			tag += " HINTBG!"
+			bad = true
+		}
 		fmt.Printf("[%s] %s（宽 %d/%d）\n", tag, c.name, got, want)
 		fmt.Printf("    %s\n", stripANSI(line))
+		fmt.Printf("    %s\n", stripANSI(hint))
 	}
 
 	// 阈值色抽查：上下文条的百分比处应为对应颜色（SGR 逐字节核对）
@@ -432,7 +477,8 @@ func runStatusTest() {
 	fmt.Println("statustest: 全部通过")
 }
 
-// hintText 状态栏右侧快捷键提示（随忙闲 / 权限面板 / 选择态切换）。
+// hintText 快捷键提示内容（随忙闲 / 权限面板 / 选择态切换）。
+// 2026-09-20 起由 renderHintBar 消费——提示行独立在状态栏信息行下方。
 func (m model) hintText() string {
 	if m.perm != nil {
 		return "y 允许一次  \u00B7  a 始终允许  \u00B7  n 拒绝  \u00B7  esc 取消"

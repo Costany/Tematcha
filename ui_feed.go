@@ -29,19 +29,24 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	textStyle     lipgloss.Style // 正文
-	userBarStyle  lipgloss.Style // 用户消息左侧竖条（强调绿）
-	thoughtPre    lipgloss.Style // 思考前缀
-	thoughtTtl    lipgloss.Style // 思考标题
-	thoughtTxt    lipgloss.Style // 思考正文（暗）
-	toolStyle     lipgloss.Style // 工具行（进行中）
-	toolOKStyle   lipgloss.Style // 工具行·成功（柔绿）
-	toolErStyle   lipgloss.Style // 工具行·失败（柔红）
-	toolOutStyle  lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
-	dimStyle      lipgloss.Style // 次要信息
-	errStyle      lipgloss.Style // 错误（柔红）
-	errBadgeStyle lipgloss.Style // 错误徽章 ERROR（白字 + 低饱和红底；§0.5 唯一底色例外）
-	accentStyle   lipgloss.Style // 强调色（追问面板边条/标题等小面积强调）
+	textStyle       lipgloss.Style // 正文
+	userBarStyle    lipgloss.Style // 用户消息左侧竖条（强调绿）
+	thoughtPre      lipgloss.Style // 思考前缀
+	thoughtTtl      lipgloss.Style // 思考标题
+	thoughtTxt      lipgloss.Style // 思考正文（暗）
+	toolStyle       lipgloss.Style // 工具行（进行中）
+	toolOKStyle     lipgloss.Style // 工具行·成功（柔绿）
+	toolErStyle     lipgloss.Style // 工具行·失败（柔红）
+	toolOutStyle    lipgloss.Style // 工具卡展开区·输出（亮度介于正文与暗色之间）
+	dimStyle        lipgloss.Style // 次要信息
+	errStyle        lipgloss.Style // 错误（柔红）
+	errBadgeStyle   lipgloss.Style // 错误徽章 ERROR（白字 + 低饱和红底；§0.5 唯一底色例外）
+	panelLabelStyle lipgloss.Style // 右栏字段标签（标识 / 模型 / 模式 / 上下文 / LSPs / MCPs / skills）
+	// 右栏字段值：加粗 + 三色（体绿 / 鞋橙 / 鞍红；mono 退三级灰）
+	panelValIDStyle    lipgloss.Style // 值·标识（session id）
+	panelValModelStyle lipgloss.Style // 值·模型名
+	panelValModeStyle  lipgloss.Style // 值·模式
+	accentStyle        lipgloss.Style // 强调色（追问面板边条/标题等小面积强调）
 
 	// 光标：反色格子 —— 与主题无关（反色不是颜色）
 	cursorStyle = lipgloss.NewStyle().Reverse(true)
@@ -59,7 +64,7 @@ var (
 
 	// 消息区右缘滚动条（M4a）：拇指=强调绿（与用户消息竖条同色，视觉语言统一），
 	// 轨道=深灰（比输入区细线更暗，与右栏分隔列拉开层次）。只前景色，透明度原则。
-	scrollThumbStyle lipgloss.Style // 拇指 ┃
+	scrollThumbStyle lipgloss.Style // 拇指 ┃（Theme.ScrollThumb，消息区与右栏共用）
 	scrollTrackStyle lipgloss.Style // 轨道 │
 )
 

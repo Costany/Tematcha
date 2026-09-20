@@ -22,9 +22,14 @@ import (
 )
 
 const (
-	panelW        = 28  // 右栏内容宽度
+	panelW        = 28  // 右栏逻辑宽度（含最右 1 列滚动条）
+	panelContentW = 27  // 右栏内容宽度（panelW - 滚动条列）
 	panelSepW     = 4   // 分隔列「  │ 」的宽度
 	minPanelWidth = 100 // 低于此宽度自动隐藏右栏（宽了恢复）
+
+	// brandName 右栏顶部品牌行文字（2026-09-19 用户点名：从 letcode 一个词
+	// 改成 "Letcode - Tematcha"，配色走品牌渐变）。
+	brandName = "Letcode - Tematcha"
 )
 
 // TodoEntry 待办快照里的一条（ACP plan entry 的精简版；priority 不展示）。
@@ -75,54 +80,155 @@ func todoMark(status string) (string, lipgloss.Style) {
 	}
 }
 
-// renderPanel 渲染右栏内容（会话 / 上下文 / 待办），行数固定为 height。
+// panelRule 右栏分区标题行：标签 + 横线补满到 panelContentW（如「上下文 ─────」）。
+// 横线用制表符 U+2500（lipgloss/终端通用的细横线），颜色走 ruleStyle。
+func panelRule(label string) string {
+	fill := panelContentW - lipgloss.Width(label) - 1
+	if fill < 0 {
+		fill = 0
+	}
+	return panelLabelStyle.Render(label) + " " + ruleStyle.Render(strings.Repeat("─", fill))
+}
+
+// panelScrollbar 右栏竖向滚动条列（M17）：数学与消息区 Scrollbar 同款
+// （照 crush internal/ui/common/scrollbar.go），拇指 = Theme.ScrollThumb。
+//
+// off = 距顶行数（0 = 贴顶，右栏信息面板默认贴顶——品牌行/目录/标题最常看）。
+// 不溢出时整列留白（与消息区一致：右栏不因条的出现/消失而横移）。
+func panelScrollbar(all []string, height, off int) []string {
+	content := len(all)
+	out := make([]string, height)
+	if content <= height {
+		return out
+	}
+	thumb := height * height / content
+	if thumb < 1 {
+		thumb = 1
+	}
+	maxOff := content - height
+	if off < 0 {
+		off = 0
+	}
+	if off > maxOff {
+		off = maxOff
+	}
+	track := height - thumb
+	pos := 0
+	if track > 0 {
+		pos = off * track / maxOff
+	}
+	for i := 0; i < height; i++ {
+		if i >= pos && i < pos+thumb {
+			out[i] = scrollThumbStyle.Render("┃")
+		} else {
+			out[i] = scrollTrackStyle.Render("│")
+		}
+	}
+	return out
+}
+
+// panelScrollMax 右栏可滚动的最大距顶行数（0 = 不溢出）。
+func panelScrollMax(all []string, height int) int {
+	if len(all) <= height {
+		return 0
+	}
+	return len(all) - height
+}
+
+// workspacePath 当前工作目录的**完整路径**（右栏「文件目录」行显示用）。
+// 2026-09-19 用户点名要路径不是 basename；超宽部分由调用方 wrapText 折行。
+// 分隔符统一成 Windows 反斜杠（workspace 常量写的是反斜杠，容错正斜杠写法）。
+func workspacePath() string {
+	if workspace == "" {
+		return ""
+	}
+	return strings.ReplaceAll(workspace, "/", "\\")
+}
+
+// renderPanel 渲染右栏内容（品牌 / 会话标题 / 标识·模型·模式 / 上下文 / 待办），
+// 行数固定为 height。
 func (m model) renderPanel(height int) []string {
 	var out []string
 
 	// ⓿ 品牌行（2026-09-19 用户点名：letcode 字样从底部状态栏左上挪到右栏
 	// 上方，"好像 crush 一样"）——品牌一行 + 一行呼吸空白。
-	out = append(out, modelStyle.Render("letcode"))
+	// 2026-09-19 二次点菜：文字改 "Letcode - Tematcha"，配色走品牌渐变
+	// （逐字符取色，§11.5；渐变锚点见 theme.go 的 BrandA/BrandC）。
+	out = append(out, brandText(brandName))
 	out = append(out, "")
 
-	// ① 会话信息
-	out = append(out, dimStyle.Render("会话"))
+	// ① 文件目录（2026-09-19 用户点菜：插在品牌行与项目标题之间，灰色）
+	//   2026-09-19 二次点菜：要**完整路径**（不是 basename）——超出 panelContentW
+	//   的部分靠折行显示全（右栏另有竖向滚动条兜底行数溢出）。
+	if d := workspacePath(); d != "" {
+		for _, ln := range wrapText(d, panelContentW) {
+			out = append(out, dimStyle.Render(ln))
+		}
+		out = append(out, "")
+	}
+
+	// ② 会话标题（单独一块）
+	// 2026-09-19 用户点菜：原来标题和 session id 都叫"会话"，右栏一眼重名——
+	// 标题上提成独立一块（与下方字段隔一行），数字 id 改名"标识"。
 	if m.sessTitle != "" {
-		for _, ln := range wrapText(m.sessTitle, panelW) {
+		for _, ln := range wrapText(m.sessTitle, panelContentW) {
 			out = append(out, textStyle.Render(ln))
 		}
 	} else {
 		out = append(out, dimStyle.Render("（未命名）"))
 	}
-	if m.modelLabel != "" {
-		out = append(out, dimStyle.Render("模型 ")+textStyle.Render(clipWidth(m.modelLabel, panelW-7)))
-	}
-	if m.modeID != "" {
-		out = append(out, dimStyle.Render("模式 ")+m.renderModeBadge())
-	}
+	out = append(out, "")
+
+	// ③ 字段行：标识 / 模型 / 模式
+	// 标签 = PanelLabel（2026-09-19 用户点菜：紫 → 改回灰）；值 = 加粗 + 三色
+	// （体绿 / 鞋橙 / 鞍红，见 theme.go 的 PanelVal* token）。
 	if sid := m.sessionID; sid != "" {
 		if len(sid) > 8 {
 			sid = sid[:8]
 		}
-		out = append(out, dimStyle.Render("会话 ")+textStyle.Render(sid))
+		out = append(out, panelLabelStyle.Render("标识 ")+panelValIDStyle.Render(sid))
+	}
+	if m.modelLabel != "" {
+		out = append(out, panelLabelStyle.Render("模型 ")+panelValModelStyle.Render(clipWidth(m.modelLabel, panelContentW-7)))
+	}
+	if m.modeID != "" {
+		out = append(out, panelLabelStyle.Render("模式 ")+panelValModeStyle.Render(m.modeID))
 	}
 	out = append(out, "")
 
-	// ② 上下文（有数据才显示）
+	// ④ 上下文（2026-09-19 用户点菜：横线行 + 无条件显示）
+	//   原来 usageSize==0 时整段省略——用户截图发现"上下文呢"，故改为恒显示。
+	//   无数据时的占位文案：引擎只在"有 token 活动"后才广播 usage
+	//   （session/new 与 session/load 的应答结构体都没有 usage 字段，
+	//   projection.rs 的 UsageUpdate 只由 TokenUsage/SessionTokenUsage 触发），
+	//   所以新建或 /resume 载入后、首次对话前必然拿不到——说清楚比画个
+	//   破折号友好。横线 = 标签 + U+2500 补满 panelContentW。
+	out = append(out, panelRule("上下文"))
 	if m.usageSize > 0 {
-		out = append(out, dimStyle.Render("上下文"))
-		out = append(out, textStyle.Render(fmtK(m.usageUsed)+" / "+fmtK(m.usageSize)))
+		out = append(out, panelValIDStyle.Render(fmtK(m.usageUsed)+" / "+fmtK(m.usageSize)))
 		rest := m.usageSize - m.usageUsed
 		if rest < 0 {
 			rest = 0
 		}
 		out = append(out, dimStyle.Render("剩余 "+fmtK(rest)))
+	} else {
+		out = append(out, dimStyle.Render("对话后显示"))
+	}
+	out = append(out, "")
+
+	// ⑤ 能力清单：LSPs / MCPs / Skills（2026-09-19 用户点菜）
+	//   格式 = 横线行 + **下一行**显示 None（用户截图纠正：None 不跟横线同行）。
+	//   ACP 侧暂无这三个数据源，先占位——将来有源只改这一处。
+	for _, k := range []string{"LSPs", "MCPs", "Skills"} {
+		out = append(out, panelRule(k))
+		out = append(out, dimStyle.Render("None"))
 		out = append(out, "")
 	}
 
-	// ③ 待办（空则整节省略；放不下时截断 + 溢出提示）
+	// ④ 待办（空则整节省略；放不下时截断 + 溢出提示）
 	if len(m.todos) > 0 {
 		done, total := m.panelDoneCount()
-		out = append(out, dimStyle.Render(fmt.Sprintf("待办 %d/%d", done, total)))
+		out = append(out, panelLabelStyle.Render(fmt.Sprintf("待办 %d/%d", done, total)))
 		room := height - len(out)
 		shown := m.todos
 		overflow := 0
@@ -232,8 +338,14 @@ func runPanelTest() {
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	okRows := len(lines) == vm.height
 	plain := stripANSI(content)
-	okSep := strings.Contains(plain, "\u2502")
-	okPanel := strings.Contains(plain, "会话") && strings.Contains(plain, "集成样张")
+	okSep := strings.Contains(plain, "│")
+	// 2026-09-19 右栏改版：标题上提成独立块、数字 id 改名"标识"、字段标签
+	// （标识/模型/模式）走 PanelLabel 色。断言跟着改。
+	okPanel := strings.Contains(plain, brandName) &&
+		strings.Contains(plain, "集成样张") &&
+		strings.Contains(plain, "标识 ") &&
+		strings.Contains(plain, "模型 ") &&
+		strings.Contains(plain, "模式 ")
 	okWidth := true
 	for _, ln := range lines {
 		if lipgloss.Width(ln) > vm.width {
@@ -241,13 +353,42 @@ func runPanelTest() {
 			break
 		}
 	}
-	if !okRows || !okSep || !okPanel || !okWidth {
+	// M20（2026-09-20 用户点菜「输入框不要沾满整个终端的宽度，右边的侧边栏要
+	// 截断他」）：① 输入框三行（两线一行）各自 = 左列宽（消息区宽 + 滚动条列），
+	// 不再沾满终端；② 组成后的输入行带右栏分隔列（侧栏一路延伸到底）且不满宽；
+	// ③ 状态栏/提示行（最后两行）才满宽（照 crush 的 help 行）。
+	ibLines := strings.Split(vm.renderInputBlock(), "\n")
+	okIB := len(ibLines) == 3
+	for _, ln := range ibLines {
+		if lipgloss.Width(ln) != vm.feed.width+scrollBarW {
+			okIB = false
+		}
+	}
+	okSep20, okFull := false, false
+	for _, ln := range lines {
+		p := stripANSI(ln)
+		if strings.Contains(p, "输入消息") {
+			okSep20 = strings.Contains(p, "│") && lipgloss.Width(ln) < vm.width
+			break
+		}
+	}
+	if len(lines) >= 2 {
+		okFull = lipgloss.Width(lines[len(lines)-1]) == vm.width &&
+			lipgloss.Width(lines[len(lines)-2]) == vm.width
+	}
+	okCut := okIB && okSep20 && okFull && vm.blockWidth() == vm.feed.width+scrollBarW-2
+	if !okRows || !okSep || !okPanel || !okWidth || !okCut {
 		bad = true
 	}
 	fmt.Println()
 	fmt.Println("== View() 集成抽查 ==")
-	fmt.Printf("  行数 %d/%d：%v ｜ 分隔列：%v ｜ 右栏内容：%v ｜ 宽度≤%d：%v\n",
-		len(lines), vm.height, okRows, okSep, okPanel, vm.width, okWidth)
+	fmt.Printf("  行数 %d/%d：%v ｜ 分隔列：%v ｜ 右栏内容：%v ｜ 宽度≤%d：%v ｜ 输入框被截断：%v\n",
+		len(lines), vm.height, okRows, okSep, okPanel, vm.width, okWidth, okCut)
+	// 底部样张（人眼核对：输入框被右栏截断、侧栏一路延伸到底、状态/提示行满宽）
+	fmt.Println("  底部样张（剥色）：")
+	for _, ln := range lines[len(lines)-8:] {
+		fmt.Printf("    |%s|\n", stripANSI(ln))
+	}
 	if hasStrayBackground(content) {
 		bad = true
 		fmt.Println("  !! 背景色检查：检测到背景色序列")
