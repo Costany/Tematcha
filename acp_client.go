@@ -22,10 +22,45 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+const (
+	loadModelMetaKey           = "letcode.dev/loadModel"
+	resumeModelUnavailableCode = "letcode.resume_model_unavailable"
+)
+
+// ACPError 保留 JSON-RPC error 的 code / message / data；resume 的结构化错误
+// 不能先拍平成字符串，否则前端只能靠脆弱的英文文案匹配。
+type ACPError struct {
+	Code    int64
+	Message string
+	Data    map[string]any
+}
+
+func (e *ACPError) Error() string {
+	return "引擎返回错误: " + e.messageText()
+}
+
+func (e *ACPError) messageText() string {
+	label := acpErrLabels[e.Code]
+	switch {
+	case label != "" && e.Message != "":
+		return fmt.Sprintf("%s（%d）：%s", label, e.Code, e.Message)
+	case e.Message != "":
+		return e.Message
+	default:
+		return fmt.Sprintf("错误码 %d", e.Code)
+	}
+}
+
+type resumeRebindOffer struct {
+	RecordedModel string
+	ActiveModel   string
+}
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -237,7 +272,7 @@ func (c *ACPClient) Call(method string, params map[string]any, timeout time.Dura
 	select {
 	case res := <-ch:
 		if e, ok := res["__error__"]; ok {
-			return nil, fmt.Errorf("引擎返回错误: %s", acpErrorMessage(e))
+			return nil, newACPError(e)
 		}
 		return res, nil
 	case <-timer:
@@ -355,14 +390,28 @@ func (c *ACPClient) ListSessions() ([]any, error) {
 	return asList(res["sessions"]), nil
 }
 
-// LoadSession 载入一条会话（session/load）：引擎先把历史重放成 session/update
-// 通知（只有文本），再回应答 {modes, configOptions}。重放可能很长，超时给足。
+// LoadSession 按原模型载入一条会话。普通 load 不带任何模型覆盖。
 func (c *ACPClient) LoadSession(sessionID, cwd string) (map[string]any, error) {
-	return c.Call("session/load", map[string]any{
+	return c.Call("session/load", sessionLoadParams(sessionID, cwd, ""), 120*time.Second)
+}
+
+// LoadSessionWithModelOverride 显式改用 modelRoute 载入同一会话。modelRoute 必须
+// 是 provider-qualified 路由；letcode 会把它作为用户确认过的 continue-as 操作，
+// 并在原 transcript 记录 ModelChanged。
+func (c *ACPClient) LoadSessionWithModelOverride(sessionID, cwd, modelRoute string) (map[string]any, error) {
+	return c.Call("session/load", sessionLoadParams(sessionID, cwd, modelRoute), 120*time.Second)
+}
+
+func sessionLoadParams(sessionID, cwd, modelRoute string) map[string]any {
+	params := map[string]any{
 		"sessionId":  sessionID,
 		"cwd":        cwd,
 		"mcpServers": []any{},
-	}, 120*time.Second)
+	}
+	if strings.TrimSpace(modelRoute) != "" {
+		params["_meta"] = map[string]any{loadModelMetaKey: modelRoute}
+	}
+	return params
 }
 
 // ---------------------------------------------------------------------------
@@ -412,27 +461,41 @@ var acpErrLabels = map[int64]string{
 	-32603: "引擎内部错误",
 }
 
-// acpErrorMessage 把 JSON-RPC 错误对象转成人话：
-//
-//	map[code:-32602 message:Usage: /resume <session_id>]
-//	→ 参数不合法（-32602）：Usage: /resume <session_id>
-//
-// letcode 的斜杠命令被拒走的就是这条通道（-32602 = 用法没写全，
-// -32600 = 会话设置被拒），原始形态是 Go 的 map 打印，读起来太生硬。
-func acpErrorMessage(e any) string {
-	em := asMap(e)
-	if em == nil {
-		return fmt.Sprintf("%v", e)
+// newACPError 解析 JSON-RPC error 对象，同时保留结构化 data。
+func newACPError(raw any) *ACPError {
+	m := asMap(raw)
+	if m == nil {
+		return &ACPError{Message: fmt.Sprintf("%v", raw)}
 	}
-	code := anyToInt64(em["code"])
-	msg, _ := em["message"].(string)
-	label := acpErrLabels[code]
-	switch {
-	case label != "" && msg != "":
-		return fmt.Sprintf("%s（%d）：%s", label, code, msg)
-	case msg != "":
-		return msg
-	default:
-		return fmt.Sprintf("%v", e)
+	message, _ := m["message"].(string)
+	return &ACPError{
+		Code:    anyToInt64(m["code"]),
+		Message: message,
+		Data:    asMap(m["data"]),
 	}
+}
+
+// resumeRebindOfferForError 只接受 letcode 明确声明“当前模型可继续”的错误；
+// 其它 -32603 仍按普通载入错误展示，避免误弹重绑面板。
+func resumeRebindOfferForError(err error) (resumeRebindOffer, bool) {
+	var acpErr *ACPError
+	if !errors.As(err, &acpErr) || acpErr.Data == nil || acpErr.Data["code"] != resumeModelUnavailableCode {
+		return resumeRebindOffer{}, false
+	}
+	canContinue, _ := acpErr.Data["canContinueWithActiveModel"].(bool)
+	if !canContinue {
+		return resumeRebindOffer{}, false
+	}
+	recorded, _ := acpErr.Data["recordedModel"].(string)
+	active, _ := acpErr.Data["activeModel"].(string)
+	if recorded == "" || active == "" {
+		return resumeRebindOffer{}, false
+	}
+	return resumeRebindOffer{RecordedModel: recorded, ActiveModel: active}, true
+}
+
+// acpErrorMessage 把 JSON-RPC 错误对象转成人话（Call 已改用 ACPError，
+// 此 helper 保留给探针与自检直接检查原始错误体）。
+func acpErrorMessage(raw any) string {
+	return newACPError(raw).messageText()
 }

@@ -308,8 +308,11 @@ type model struct {
 	panelOn   bool
 	panelOff  int // M17：右栏竖向滚动偏移（距顶行数；0 = 贴顶）
 
-	// M5b 钉面板（§5）：todosOn = 消息区顶部「# Todos」是否展开（/todos 开关）。
-	todosOn bool
+	// M5b / M29 To-Do 卡片（§5）：钉在消息区底部、输入区之上（照 Crush 的
+	// To-Do pill）。两层开关：todosOn = 整张卡片在不在（/todos 切换）；
+	// todosOpen = 列表展不展开（ctrl+t 切换，照 crush pills 的 ctrl+t）。
+	todosOn   bool
+	todosOpen bool
 
 	// M4b 命令弹层（§7）：cmds = 引擎广告的斜杠命令（available_commands_update）；
 	// palHidden = 被 esc 关掉过（输入再变化即恢复）；palSel = 选中在过滤结果里的下标。
@@ -354,6 +357,10 @@ type model struct {
 	sessSel   int
 	loading   bool
 
+	// M27：旧模型路由失效后，由结构化 ACP error 触发的显式重绑确认。
+	// 非 nil 时 enter/y 才发送 letcode.dev/loadModel；esc/n 不改会话。
+	resumeRebind *ResumeRebindPrompt
+
 	// 权限流（M2a）：perm = 正在展示的请求；permQueue = 排队等待的请求
 	perm      *PermRequest
 	permQueue []*PermRequest
@@ -391,6 +398,11 @@ type model struct {
 	turnChars int
 	turnSeq   int
 	closeLine string
+	// M29 ②③：输入框焦点（只驱动左侧提示符两态：聚焦 ❯ / 失焦 :::）。
+	// 纯视觉层——按键照旧全部进 InputBar，失焦也能打字，避免"点一下就哑了"。
+	// 命中测试在 handleClick：点输入区 = 聚焦，点别处 = 失焦。
+	inputFocused bool
+
 	closeKind int
 }
 
@@ -409,6 +421,8 @@ func initialModel(c *ACPClient, sid, modelLabel, modelProvider, modeID, reasonin
 		reasoningList: reasoningList,
 		panelOn:       true,
 		todosOn:       true,
+		todosOpen:     true,
+		inputFocused:  true,
 		tools:         make(map[string]*FeedItem),
 	}
 }
@@ -456,7 +470,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.ev.Method == methodLoadDone {
 			id, _ := msg.ev.Params["id"].(string)
 			title, _ := msg.ev.Params["title"].(string)
-			return m.finishLoad(id, title, msg.ev.Err)
+			reboundModel, _ := msg.ev.Params["reboundModel"].(string)
+			return m.finishLoad(id, title, reboundModel, msg.ev.Err)
 		}
 		m.handleEvent(msg.ev)
 		return m, waitEvent(m.client)
@@ -484,7 +499,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 只有"没有引擎连接"的自检路径还走这里（loadSessionAsync 直接返回）。
 		// 正常载入的完成事件走事件通道（acpEventMsg → methodLoadDone → finishLoad），
 		// 保证排在整段历史重放之后。
-		return m.finishLoad(msg.id, msg.title, msg.err)
+		return m.finishLoad(msg.id, msg.title, msg.reboundModel, msg.err)
 
 	case newSessionDoneMsg:
 		return m.handleNewSession(msg)
@@ -496,6 +511,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clearCursor()
 			m.exitCardNav()
 			m.dropPerms("引擎连接断开")
+			m.resumeRebind = nil
 			m.feed.Append(kError, "引擎连接断开（letcode 进程已退出）")
 			m.status = stEngineGone
 		}
@@ -550,6 +566,14 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// ctrl+t：To-Do 卡片的列表收起 / 展开（M29，照 crush pills 的 ctrl+t）。
+	// 必须排在输入框前面 —— InputBar 对没专门处理的键会静默吃掉，ctrl+t 到
+	// 不了这里。快照为空时 toggleTodosExpanded 自己不动（没有东西可展开）。
+	if k.String() == "ctrl+t" {
+		m.toggleTodosExpanded()
+		return m, nil
+	}
+
 	// 权限面板模态：y/a/n/esc 归它；其余键不进输入框（防误输入）。
 	// 滚动键放行（交给下面的滚动分支）——面板期间也能回看历史。
 	if m.perm != nil {
@@ -587,6 +611,20 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// M27 模型重绑确认：只有用户明确确认才会发送 override；取消不动引擎状态。
+	if m.resumeRebind != nil {
+		switch k.String() {
+		case "enter", "y":
+			return m.acceptResumeRebind()
+		case "esc", "n":
+			return m.cancelResumeRebind()
+		case "up", "down", "pgup", "pgdown":
+			// 滚动键放行
+		default:
+			return m, nil
+		}
+	}
+
 	// 会话选择列表（M4d）：↑↓ 选、enter 载入、esc 关闭；开着时其余键不进输入框。
 	// 排在权限面板之后、命令弹层之前 —— 它是更"重"的模态。
 	if m.sessOn {
@@ -611,19 +649,7 @@ func (m model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			row := m.sessRows[m.sessSel]
 			m.sessOn = false
-			m.loading = true
-			m.busy = true // 载入期间禁发：引擎同一时刻只安装一条会话
-			m.status = stLoading
-			m.clearCursor()
-			m.endThoughtCycle()
-			m.endAssistantSegment()
-			m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
-			m.tools = make(map[string]*FeedItem)
-			m.feed = NewFeed() // 重放会把整套历史重新上屏：先清旧画面
-			m.feed.Append(kSys, "载入会话 "+row.ID+"（引擎将重放历史）")
-			m.resetUsage() // M5d：清用量快照，避免把换会话误判成压缩
-			m.syncLayout()
-			return m, loadSessionAsync(m.client, row.ID, row.Title)
+			return m.beginSessionLoad(row.ID, row.Title, "")
 		default:
 			return m, nil
 		}
@@ -762,7 +788,8 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		// 弹层首行的屏幕行号：顶部留白 + 消息块（钉面板+消息行，总高不变）+ 空行
 		// + 权限面板 + 追问面板（2026-09-19 补算：此前漏了追问面板高度）
 		palTop := 1 + len(m.renderTodosPinned(m.feed.width)) + m.feed.normH() + 1 +
-			len(m.renderPermPanel(m.bottomW())) + len(m.renderElicitPanel(m.bottomW()))
+			len(m.renderPermPanel(m.bottomW())) + len(m.renderElicitPanel(m.bottomW())) +
+			len(m.renderResumeRebind())
 		if msg.Y >= palTop {
 			if ci, ok := m.palRowAt(msg.Y - palTop); ok {
 				c := m.cmds[ci]
@@ -775,8 +802,23 @@ func (m model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	// View 布局：第 0 行是顶部留白，之后就是消息区窗口（钉面板 M5b 在消息区
-	// 底部，不占消息行偏移——2026-09-19 搬家后点击命中不再减钉面板高度）
+	// 输入区命中测试（M29 ③）：View 拼装顺序是 left = 消息行 + To-Do 卡片，
+	// bottom = 间隔空行 + 各面板 + 工作区 + 输入区 —— 所以输入区是整帧最后
+	// 几行，起点 = 顶部留白 + 其余全部行。点它 = 聚焦（❯ 亮起），点别处 = 失焦。
+	// 必须排在下面 ItemAt 之前，否则点输入框会掉进消息命中测试、把消息选中态清掉。
+	inputH := len(strings.Split(m.renderInputBlock(), "\n"))
+	inputTop := 1 + m.feed.normH() + len(m.renderTodosPinned(m.feed.width)) + 1 +
+		len(m.renderPermPanel(m.bottomW())) + len(m.renderElicitPanel(m.bottomW())) +
+		len(m.renderCmdPalette()) + len(m.renderSessionPicker()) +
+		len(m.renderResumeRebind()) + len(m.workStripLines()) + 1
+	if msg.Y >= inputTop && msg.Y < inputTop+inputH {
+		m.inputFocused = true
+		return m, nil
+	}
+	m.inputFocused = false
+
+	// View 布局：第 0 行是顶部留白，之后就是消息区窗口（To-Do 卡片在消息区
+	// 底部，不占消息行偏移——2026-09-19 搬家后点击命中不再减卡片高度）
 	target := m.feed.ItemAt(msg.Y - 1)
 
 	// 工具卡：展开/收起（没有可展开内容时不响应，免得误置 UserSet）。
@@ -1211,12 +1253,25 @@ func (m model) forceCancelFinish() (tea.Model, tea.Cmd) {
 // 翻假，后面的 agent_message_chunk 全走 lastAssistant 合并路径，回答并进第一条
 // 助手消息（位置很高，翻页才看得见），用户看到"只剩三条提问"。现在完成事件由
 // loadSessionAsync 注入事件通道，与重放同一条 FIFO，天然排在最后。
-func (m model) finishLoad(id, title string, err error) (tea.Model, tea.Cmd) {
+func (m model) finishLoad(id, title, reboundModel string, err error) (tea.Model, tea.Cmd) {
 	m.loading = false
 	m.busy = false
+	m.resumeRebind = nil
 	if err != nil {
-		m.status = stError
-		m.feed.Append(kError, "载入会话失败："+err.Error())
+		if offer, ok := resumeRebindOfferForError(err); ok && reboundModel == "" {
+			m.status = stIdle
+			m.closeLine, m.closeKind = "", closePlain
+			m.resumeRebind = &ResumeRebindPrompt{
+				ID: id, Title: title,
+				RecordedModel: offer.RecordedModel,
+				ActiveModel:   offer.ActiveModel,
+			}
+			m.feed.ScrollToBottom()
+			m.feed.Append(kWarn, "原模型 "+offer.RecordedModel+" 已不可用")
+		} else {
+			m.status = stError
+			m.feed.Append(kError, "载入会话失败："+err.Error())
+		}
 	} else {
 		m.sessionID = id
 		// 会话标题：session/load 的应答里没有它，而引擎的 session_info_update
@@ -1227,7 +1282,11 @@ func (m model) finishLoad(id, title string, err error) (tea.Model, tea.Cmd) {
 			m.sessTitle = title
 		}
 		m.status = stDone
-		m.feed.Append(kSys, "已载入会话 "+id)
+		if reboundModel != "" {
+			m.feed.Append(kSys, "已载入会话 "+id+" · 模型 → "+reboundModel)
+		} else {
+			m.feed.Append(kSys, "已载入会话 "+id)
+		}
 	}
 	m.syncLayout()
 	return m, waitEvent(m.client)
@@ -1293,6 +1352,7 @@ func (m *model) resetSession() {
 	m.busy, m.loading = false, false
 	m.sessOn, m.sessReady, m.sessSel = false, false, 0
 	m.sessRows = nil
+	m.resumeRebind = nil
 	m.palHidden, m.palSel = false, 0
 	m.histOn, m.histIdx, m.histDraft = false, 0, ""
 	m.blinkOn, m.blinkN = false, 0
@@ -1890,9 +1950,9 @@ func (m model) View() tea.View {
 	// 右栏（§4/§5）显示时：消息区每行右侧拼「  │ 」+ 右栏对应行
 	feedLines := m.feed.Render()
 	bar := m.feed.Scrollbar() // M4a：右缘滚动条列（空串 = 该行不画）
-	// M5b：钉面板（# Todos）钉在消息区最下方（2026-09-19 用户点菜：从顶部搬到
-	// 底部，照 Claude Code——待办紧贴最新消息之下、输入区之上），不参与滚动
-	// （高度已在 syncLayout 扣出）
+	// M5b / M29：To-Do 卡片钉在消息区最下方（2026-09-19 搬家：顶部 → 底部，照
+	// Claude Code；2026-09-25 改成 Crush 风格的圆角卡片 + ctrl+t 收起），
+	// 待办紧贴最新消息之下、输入区之上，不参与滚动（高度已在 syncLayout 扣出）
 	pinned := m.renderTodosPinned(m.feed.width)
 	left := make([]string, 0, len(pinned)+len(feedLines))
 	left = append(left, feedLines...)
@@ -1921,12 +1981,19 @@ func (m model) View() tea.View {
 	for _, ln := range m.renderSessionPicker() {
 		bottom = append(bottom, ln)
 	}
+	// ②.6b 显式模型重绑确认（M27）：普通 load 失败后，让用户明确选择是否继续。
+	for _, ln := range m.renderResumeRebind() {
+		bottom = append(bottom, ln)
+	}
 	// ②.7 工作区（M11 · §11.6）：输入栏正上方的一行——忙时工作行 / 压缩进度条，
 	// 闲时上一回合的收尾行；行数已在 syncLayout 里从消息区扣出。
 	for _, ln := range m.workStripLines() {
 		bottom = append(bottom, ln)
 	}
-	// ③ 输入区（上下细线 + 输入行）
+	// ②.8 输入区上方的呼吸空行（M29 · 用户点菜「一气呵成 · 7s 离下面的输入太近」）：
+	// 恒占一行 —— 有收尾行时把它推离输入框，没收尾行时输入框也不贴住上一块。
+	bottom = append(bottom, "")
+	// ③ 输入区（输入行 + 单底线）
 	for _, ln := range strings.Split(m.renderInputBlock(), "\n") {
 		bottom = append(bottom, ln)
 	}

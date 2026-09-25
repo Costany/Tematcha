@@ -1,6 +1,6 @@
 # Tematcha · UI 渲染规格清单
 
-> 版本 v0.2 ｜ 2026-09-17（四项设计定稿，见 §15 决策记录）｜ 依据：letcode v0.14.0 ACP 源码取证 + letcode 自带 TUI 截图观察（13 张，见 `refs/screenshots/`）
+> 版本 v0.3 ｜ 2026-09-25（新增 M27 旧模型显式重绑，见 §7 / §15）｜ 依据：letcode v0.17.0 ACP 源码取证 + letcode 自带 TUI 截图观察（13 张，见 `refs/screenshots/`）
 >
 > 阅读方式：每块 = **数据来源 → 视觉形态 → 键位/交互**
 > 标记：✅ 协议可得 ｜ ⚠️ v1 受限 ｜ 💤 愿望清单（需上游扩展）
@@ -11,12 +11,12 @@
 ┌──────────────────────────────────────────┬──────────────┐
 │ 消息区（滚动）                              │ 右侧栏（可折叠）│
 │  用户消息 / 助手回复(Markdown) / 思考块      │  会话信息      │
-│  工具卡 / 权限回执 / 错误块 / 摘要条          │  上下文条      │
-│                                          │  待办          │
+│  工具卡 / 权限回执 / 错误块 / 摘要条          │  Context 条     │
+│                                          │  LSPs/MCPs/Skills │
 ├──────────────────────────────────────────┼──────────────┤
 │ 工作区（M11）：忙 = 工作行 · 闲 = 收尾行 │              │
 ├──────────────────────────────────────────┼──────────────┤
-│ 输入区（❯ + 上下规则线，宽 = 左列·被右栏截断  │              │
+│ 输入区（❯ 或 ::: + 输入行 + 一条底线，宽 = 左列·被右栏截断│              │
 ├──────────────────────────────────────────┴──────────────┤
 │ 状态栏（信息行）：模式徽章 ｜ 上下文 miniBar % ｜ 模型 · 思考 │
 ├─────────────────────────────────────────────────────────┤
@@ -25,11 +25,15 @@
 （权限面板 / 命令弹层在输入区上方弹出；右栏可见时整个底部区块只占左列——输入框被侧边栏截断，只有状态栏/提示行满宽；默认不画底、终端透明优先）
 ```
 
+输入区只有**一条底线**（M29 ①）：一行输入 + 一行 `─`，不再是上下两条细线夹住。左侧提示符恒 4 格，两态 = 聚焦 ` ❯` / 失焦 `::: `（照 Crush 的 `SetPromptFunc(4, ...)` 宽度契约，符号保留我们的 `❯`；详见 §6）。
+
 消息区右缘贴一列滚动条（M4a，见 §10）：内容溢出时 `┃`（拇指，强调绿）+ `│`（轨道，深灰）；不溢出时留白；右栏可见时该列常驻，右栏不因条的出现/消失而横移。
 
-消息区底部还有钉面板（M5b，见 §5；2026-09-19 起从顶部搬到底部，照 Claude Code）：`# Todos · 计数` + 待办列表，固定不随消息滚动；占几行、消息区就让几行（整屏行数守恒）。
+消息区底部还有 To-Do 卡片（M5b，见 §5；2026-09-19 起从顶部搬到底部，照 Claude Code；2026-09-25 改成 Crush 风格）：圆角外框的 `To-Do x/y · ctrl+t close` 标题行 + 框内 `✓/◐/○` 列表，固定不随消息滚动；`ctrl+t` 收起列表（标题行保留并接上当前任务）、`/todos` 整卡显隐；占几行、消息区就让几行（整屏行数守恒）。
 
 输入区正上方还有工作区（M11，见 §11.6）：一行高——忙时是灵动工作行或压缩进度条（§8），闲时是上一回合的收尾行；占行时消息区相应让位（整屏行数守恒）。
+
+M27 旧模型确认面板也钉在输入区上方：普通载入收到结构化的缺模型错误后，面板显示原模型到当前模型的切换预览；用户确认后才发送带 `_meta` 的第二次 `session/load`，取消则不发请求。面板高度与其它弹层统一从消息区预算中扣除，不能遮挡消息或输入区。
 
 ## 0.5 视觉原则（2026-09-17 用户要求）
 
@@ -98,6 +102,10 @@
 - **出错时不做收尾装饰（2026-09-19 用户点菜）**：`msg.err != nil` 时——① **不落回合分隔行**（`◇ 模型 via 供应商 in 时长`；用户原话"也不要显示 XX 模型 via xx in xxms"——出错的信息量全在 ERROR 块里，"哪个模型、多久才失败"是噪音）；② **工作区收尾行整行留空**（原来会落"半路卡壳 · 10ms"；`closeLine = ""` 即不占行）。取消回合不受影响（仍显示"中途收兵 · Xs"）
 - **"怎么办"提示行（M4e 新增）**：`FeedItem.Detail` → 错误块尾补一行暗色 `提示: …`（命令用法类 → 引导用 `/` 补全；本地专有命令 → 说明 ACP 下不可用；推理档位被拒 → 提示换模型 / 查可选值）
 - **折行规则（M4e 打磨，2026-09-18）**：`wrapText` 的折行点优先落在空白（词边界）上——英文 / 路径 / 命令名不被拦腰截断（此前会出现「…或用 /reasonin」+「g 查看可选值」）；找不到空白（超长 URL、长代码行）才退化成按宽度硬切；折行点上的空白被吃掉，不飘到下一行行首。`-feedtest` 有对应断言（样张 `["提示:" "当前模型不接受该推理档位——可先" "/model 换模型，或用" "/reasoning 查看可选值"]`）
+
+- **M27 结构化旧模型错误（2026-09-25）**：普通 `session/load` 仍按 transcript 记录的 provider-qualified route 精确恢复；记录路由已从当前配置删除时，引擎在提交前 fail-closed，返回 JSON-RPC `-32603`，并在 `error.data` 给出 `code=letcode.resume_model_unavailable`、`recordedModel`、`activeModel`、`canContinueWithActiveModel`。Tematcha 仅在最后一项为 true 且两条路由非空时把错误转成确认面板，不把普通内部错误误判为可重绑。
+- **M27 重绑结果**：确认后仍请求同一 `session/load`，只在 `_meta` 携带 `letcode.dev/loadModel`；成功保留原 session、branch、history、compaction 和 children，并在 transcript 追加一次 `ModelChanged`。取消不发第二次请求、不改当前会话。
+- **M27 能力变化**：目标路由重新准备并成为执行 authority；目标模型不支持的 reasoning effort 回退到目标模型默认值，历史图像按目标路由能力投影为占位文本。请求投影不会假定旧路由能力仍然适用于新路由。
 
 ### 1.6 摘要/回执条（绿条）
 
@@ -190,28 +198,36 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 ## 4. 右侧栏（可折叠）
 
 - 会话信息：标题（session_info_update）✅ ｜ 模型 ✅ ｜ 权限模式 ✅ ｜ 会话 id ✅（分支/节点 ⚠️）
-- 上下文：总条 + used/size + 剩余容量 ✅（分段明细 💤）
-- 待办：小列表 + `待办 3/7` 计数 ✅（详见 §5）
+- 上下文：**英文标题 `Context` + 满宽真实用量进度条 + `used / size · left N`** ✅（分段明细 💤，理由见 §15 ❽）
+- 待办：M29 起**移出右栏**（右栏只留会话信息 + Context + LSPs/MCPs/Skills），待办统一由 §5 的 To-Do 卡片承担
 - 交互（**定稿·ctrl+b**）：ctrl+b 开关 + `/panel on/off` 命令兜底 + 窄屏自动隐藏（宽度 <100 列折起，宽了恢复）
-- **现状（M3b 实装，2026-09-18）**：消息区右侧「 │ 」分隔列 + 28 格信息栏（会话标题/模型/模式/会话 id 短码 → 上下文 used/size/剩余 → 待办 `○/◐/✓` 列表 + `待办 1/4` 计数；超长截断、放不下时 `… 还有 N 条`）。`ctrl+b` 开关（默认开）；`<100` 列自动隐藏、宽了恢复；鼠标点击右栏区域不落到消息区。数据：`session_info_update.title`、`plan.entries`（全量快照；blocked→pending、cancelled→completed 有损映射接受）。自检：`-paneltest`（样张 + panelVisible 判定 + parsePlan + View() 集成抽查全绿）。**2026-09-19**：右栏最上方加**品牌行** `letcode`（modelStyle）+ 一行呼吸空白（用户点名"把左下角的 letcode 改到右边那个区域的上方，好像 crush 一样"）；状态栏随之去掉品牌前缀（§3）
+- **现状（M3b 实装，2026-09-18）**：消息区右侧「 │ 」分隔列 + 28 格信息栏（会话标题/模型/模式/会话 id 短码 → 上下文 → LSPs/MCPs/Skills）。`ctrl+b` 开关（默认开）；`<100` 列自动隐藏、宽了恢复；鼠标点击右栏区域不落到消息区。数据：`session_info_update.title`、usage_update、plan.entries（后者 M29 起只喂 §5 卡片）。自检：`-paneltest`（样张 + Context 条宽度 + panelVisible 判定 + parsePlan + View() 集成抽查全绿）。**2026-09-19**：右栏最上方加**品牌行** `letcode`（modelStyle）+ 一行呼吸空白（用户点名"把左下角的 letcode 改到右边那个区域的上方，好像 crush 一样"）；状态栏随之去掉品牌前缀（§3）。**2026-09-25（M29）**：上下文分区标题改英文 `Context`，数值行拆成「**满宽 █/░ 进度条** + `87.3k / 320k · left 233k`」两行（进度条填充色沿用 §3 同一套阈值：<60 绿 / ≥60 黄 / ≥85 红；无数据占位文案 `对话后显示` → `after first turn`）；右栏内的待办小列表删除（与 §5 卡片重复）。自检 `-paneltest` 增 `Context` 样张三档（27/62/94%）+ 标题在场/中文「上下文」缺席断言
 
 ## 5. 待办（Plan）
 
 - 数据：`plan` 通知 —— **全量快照**（每次整体替换；content/status；无 id；优先级恒 medium）✅
-- 形态：
-  - 右栏小列表：`○` 待办 / `◐` 进行中 / `✓` 完成（完成=暗色）
-  - 消息区一次性钉面板（`# Todos`，letcode 同款），新快照时更新，`/todos` 可收起
+- 形态（M29 定稿 · 照 Crush 的 To-Do pill）：消息区底部的**圆角外框卡片**——`╭─…─╮` / 标题行 `To-Do  x/y` + 右对齐 `ctrl+t close`（收起时变 `ctrl+t open`）/ 框内每行 `✓ 完成`（绿）`◐ 进行中`（琥珀）`○ 待办`（暗色）+ `/╰─…─╯`；**不带 `#` 前缀**
+- 两层开关：`/todos` 管整卡显隐（`todosOn`）；`ctrl+t` 管列表收起/展开（`todosOpen`，照 crush pills 的 Ctrl+T）
+- 宽度与篇幅：卡片宽 = 消息区宽（`contentW = 总宽 - 3`，每行恒等）；最多 6 条、超出折成 `… N more`；只前景色、无背景色
 - 注意：blocked→pending、cancelled→completed 有损映射（接受，视觉无法区分）
-- **现状（M3b 实装，2026-09-18）**：右栏小列表已实装（`○/◐/✓` + `待办 1/4` 计数）
-- **现状（M5b 实装，2026-09-18；2026-09-19 搬家）**：消息区底部钉面板已实装 —— `# Todos · 1/4` 标题 + `○/◐/✓` 列表（完成项暗色）；固定不动、不参与滚动；最多 6 条、超出折成 `… 还有 N 条`；`/todos` 开关（客户端命令：不发引擎、不进历史、不新开回合）；数据随 `plan` 全量快照刷新（行数变化 → 消息区高度自动重算）；宽度按显示宽裁剪、只前景色。自检：`-todostest`（渲染/超长截断/开关/布局让位/View 集成 5 项全绿）
+- 引擎侧没有 `active_form`（crush 收起态用 `ActiveForm` 回退 `Content`），所以收起时接在计数后面的是 `in_progress` 那条的 `content`
+- **现状（M5b 实装，2026-09-18；2026-09-19 搬家；2026-09-25 改造成 Crush 风格卡片）**：位置仍是消息区底部（紧贴最新消息之下、输入区之上 = crush pills 的位置，**没有搬进右栏**）；固定不动、不参与滚动；数据随 `plan` 全量快照刷新（行数变化 → 消息区高度自动重算）。`-todostest` 6 项全绿：展开态（圆角外框 / `To-Do 1/4` / `ctrl+t close` / 无 `#` / 宽度恒等 / 无背景色）、超长截断、**ctrl+t 收起与再展开**（走真实 `handleKey`）、`/todos` 整卡显隐、布局让位、View 集成
 
 ## 6. 输入区
 
-- 形态：上下规则线 + `❯` 前缀；rune 级编辑（CJK 安全）+ 水平窗口滚动 ✅
+- 形态（M29 ① 定稿）：**一行输入 + 一条底线**（不再是上下两条细线夹住）；左侧提示符恒 4 格，两态 = 聚焦 ` ❯` / 失焦 `::: `；rune 级编辑（CJK 安全）+ 水平窗口滚动 ✅
 - 回合锁：进行中禁发（引擎拒并发），提示 `esc 取消`；esc → `session/cancel`
 - 粘贴/中文/IME：统一走 `msg.Text` 路径
 - 历史：↑/↓ 翻历史输入（M4+ 可选）
 - **现状（M4c 实装，2026-09-18）**：↑↓ 的归属分两档 —— 输入框**空着**（或正在翻历史）时 ↑↓ 翻历史；**有草稿**时 ↑↓ 照旧滚消息区（滚轮 / PgUp / PgDn 全程不受影响）。历史只活在内存（不落盘、跨会话不保留）；空串与连续重复不入栈；↓↓ 越过最新一条时还原"开翻前的草稿"并退出浏览；翻出来后**手改一个字即退出浏览**（此后 ↑↓ 回滚动）。自检：`-histtest`（12 项）
+
+- **现状（M29 ①②③ · 2026-09-25 用户点菜 · 附 Crush 两张截图）**：① **只留一条底线**（上下两条细线撤掉；输入区占行 3 → 2，`syncLayout` 底部常数 7 → 6）。②③ **左侧提示符改两态**（用户原话「左边不要 ❯ 这个符号，crush 是横躺着的六个点…鼠标选择就会让第一个盲文变为 ❯」）。**先纠三处认知偏差（子代理读 crush 源码取证）**：
+
+  1. 那"六个点"在 crush 源码里是**三个 ASCII 冒号 `:`（U+003A）横排一行**，不是盲文（U+2800–U+28FF 全仓 0 处命中）；
+  2. 焦点态不是"第一个点变成 ❯"，而是 `LineNumber == 0` 那一行**整体换成另一个 4 格字符串**（`normalPromptFunc`，crush 用的是 ASCII `>` 不是 `❯`）；
+  3. crush **编辑器一条线都没有**（无 lipgloss border、无 rule），也没有放大镜——那三行是 textarea 的 `MinHeight = 3`（真多行编辑）。
+
+  **采纳方案（用户点头）**：只抄 crush 的**几何契约**（`SetPromptFunc(4, ...)`：两态恒 4 格，切焦点时整行宽度不变、光标不左右呼吸），符号保留 Tematcha 的 `❯`（比 ASCII `>` 有力）、失焦态用 crush 原样的 `:::`。④ **三行不抄**（用户明确「不想全抄」）——crush 那 3 行全是 textarea 真功能（`DynamicHeight` + 软换行 + 换行键 `ctrl+j`/`shift+enter` + 选区复制 + 光标 Y 偏移），抄它等于换组件；而且 `enter 发送` 的交互也不允许输入框变高。⑤ **焦点是纯视觉层**（model 新增 `inputFocused`）：按键照旧全部进 `InputBar`，失焦也能打字——避免"点一下消息就哑了"的困惑；启动即聚焦（用户选定）。命中测试在 `handleClick`，且**必须排在 `feed.ItemAt` 之前**（否则点输入框会掉进消息命中测试、把消息选中态清掉）：输入区是整帧最后几行，`inputTop = 1 + feed 高 + 卡片高 + 1 + 各面板高 + 工作区高`，点别处则 `inputFocused = false`。自检：`-paneltest` 新增输入区块 —— 两态样张 + 两行等宽 + 前缀恒 4 格 + 单底线（末行全 `─`、输入行无 `─`）
 
 - **现状（M3c 实装，2026-09-18）· 回合锁改为队列**：回合进行中提交 → 消息入队并在消息区落一条 `kQueued`（形态同用户消息，但整体暗色：暗灰竖条 + 暗字 + 尾行「· 排队中」）；当前回合结束（正常 / 取消 / 出错都算）后队首**原地转正**（Kind 换回 kUser → 绿条亮字，位置不动、不产生第二条消息）并自动开下一回合。FIFO；排队时同样进输入历史（↑↓ 可召回）；状态栏显示「排队 N」。`/resume` 在回合进行中仍走提示（载入会重放历史，要独占一个空闲回合）；命令护栏优先于排队（必拒命令不会被排进队列）。自检：`-queuetest`（6 项）
 
@@ -244,6 +260,26 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
   - 引擎真拒绝时（如 `/reasoning high` 被模型/供应商拒）→ ACP 错误格式化成人话（`参数不合法（-32602）：…` / `请求被拒（-32600）：…`）+ 尾随"怎么办"提示行
   - 连按回车不刷屏：紧挨着的上一条同款琥珀提示不重复落行（`Feed.Last()` 去重；`-cmdtest` 有断言）
   - 自检：`-cmdtest` 25 项（新增：护栏三态拦截 / 合法命令与普通文本放行 / `submit` 走护栏不发引擎、输入保留 / 护栏去重）
+
+### M27 旧模型显式重绑
+
+- **普通路径**：`session/load` 只使用 `sessionId`、`cwd`、`mcpServers`，不发送模型覆盖；旧模型不可用时保持 fail-closed，不自动换模型。
+- **错误识别**：Tematcha 保留 JSON-RPC `error.data`，仅接受 `code=letcode.resume_model_unavailable`、`canContinueWithActiveModel=true` 且 `recordedModel` / `activeModel` 非空的结果。
+- **确认面板**：显示 `原模型已不可用`、`recordedModel -> activeModel`、同会话记录提示和键位行；`enter` 或 `y` 确认，`esc` 或 `n` 取消。面板只使用前景色和竖线，按可用宽度裁剪。
+- **显式请求**：确认后重发同一个 `session/load`，增加如下私有扩展字段；普通请求绝不带该字段：
+
+```json
+{
+  "_meta": {
+    "letcode.dev/loadModel": "provider/model"
+  }
+}
+```
+
+- **原子结果**：letcode 先准备目标 route、验证 runtime snapshot、上下文范围、token 估算和 fast mode，再提交 live session；成功后保留原 session id 和历史，并追加一次 `ModelChanged`。目标 route 不同才追加；目标相同不产生多余事件。
+- **失败边界**：显式 route 无效或目标 route 无法准备时，Agent、live recorder 和原 transcript 都不改变；Tematcha 不自动再次重试，也不循环弹确认面板。
+- **能力与设置**：目标模型的 reasoning、图片和其它 request metadata 重新成为 authority；不支持的历史图片在请求投影中降级为占位文本，reasoning effort 不可用时回到目标模型默认值。
+- **自检**：`-sesstest` 覆盖结构化 offer、无背景面板、确认/取消、正常 load 不带 `_meta`、显式 load 带 `_meta`、同会话收据；`-loadtest` 继续覆盖重放保序。
 
 ## 8. 压缩（Compact）
 
@@ -392,34 +428,37 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 
 ## 12. 键位总表
 
-| 场景     | 键                      | 行为                                      |
-| -------- | ----------------------- | ----------------------------------------- |
-| 输入     | enter                   | 发送                                      |
-| 输入     | esc                     | 清空 / 回合中=取消回合（session/cancel）  |
-| 输入     | ↑/↓                     | 历史（M4+）                               |
-| 权限     | y / a / n               | 允许一次 / 始终允许 / 拒绝                |
-| 权限     | esc                     | 取消（答 cancelled）                      |
-| 弹层     | ↑↓ / tab / enter / esc  | 选择 / 补全 / 执行 / 关闭                 |
-| 消息区   | 滚轮 / PgUp / PgDn      | 滚动                                      |
-| 消息区   | tab                     | 进入工具卡选择态（↑↓ 选卡 / enter 展开）  |
-| 消息区   | enter                   | 选择态 = 展开/收起选中卡；平时 = 发送     |
-| 消息区   | esc（选择态）           | 退出选择态（不取消回合）                  |
-| 输入     | ↑/↓（空输入或翻历史中） | 翻历史输入（有草稿时仍归消息区滚动，M4c） |
-| 会话列表 | ↑↓ / enter / esc        | 选择 / 载入（session/load 重放）/ 关闭    |
-| 全局     | ctrl+b                  | 右栏开关                                  |
-| 全局     | ctrl+c                  | 退出                                      |
-| 全局     | /                       | 命令弹层                                  |
+| 场景         | 键                      | 行为                                            |
+| ------------ | ----------------------- | ----------------------------------------------- |
+| 输入         | enter                   | 发送                                            |
+| 输入         | esc                     | 清空 / 回合中=取消回合（session/cancel）        |
+| 输入         | ↑/↓                     | 历史（M4+）                                     |
+| 权限         | y / a / n               | 允许一次 / 始终允许 / 拒绝                      |
+| 权限         | esc                     | 取消（答 cancelled）                            |
+| 弹层         | ↑↓ / tab / enter / esc  | 选择 / 补全 / 执行 / 关闭                       |
+| 消息区       | 滚轮 / PgUp / PgDn      | 滚动                                            |
+| 消息区       | tab                     | 进入工具卡选择态（↑↓ 选卡 / enter 展开）        |
+| 消息区       | enter                   | 选择态 = 展开/收起选中卡；平时 = 发送           |
+| 消息区       | esc（选择态）           | 退出选择态（不取消回合）                        |
+| 输入         | ↑/↓（空输入或翻历史中） | 翻历史输入（有草稿时仍归消息区滚动，M4c）       |
+| 会话列表     | ↑↓ / enter / esc        | 选择 / 载入（session/load 重放）/ 关闭          |
+| 模型重绑确认 | enter / y               | 使用当前模型重绑原会话                          |
+| 模型重绑确认 | esc / n                 | 取消，不发送重绑请求                            |
+| 全局         | ctrl+b                  | 右栏开关                                        |
+| 全局         | ctrl+t                  | To-Do 卡片列表收起 / 展开（M29 · 有待办才生效） |
+| 全局         | ctrl+c                  | 退出                                            |
+| 全局         | /                       | 命令弹层                                        |
 
 ## 13. v1 边界与愿望清单（实锤）
 
-| #   | 内容                             | 状态                                                                            |
-| --- | -------------------------------- | ------------------------------------------------------------------------------- |
-| 1   | 子代理活体行 / /child / 完整面板 | 💤 需上游扩展 ACP projection                                                    |
-| 2   | 压缩状态主动通知（含自发压缩）   | 💤 同上                                                                         |
-| 3   | 上下文分段明细                   | 💤 协议只给 used/size 总数                                                      |
-| 4   | token ↑↓ / t/s                   | ✅ token ↑↓ 已实装（M10 · 客户端估算带 ≈，见 §11.6）；t/s 未做（引擎不给速率）  |
-| 5   | elicitation 表单                 | ✅ 已实装（M5a，2026-09-18）：能力声明 + `elicitation/create` 面板，见 §2.5     |
-| 6   | /theme、/child、/parent 等命令   | ⚠️ /theme 已由前端自管（M5c：sprout / mono 切换）；/child、/parent 仍随协议拒绝 |
+| #   | 内容                             | 状态                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 子代理活体行 / /child / 完整面板 | 💤 需上游扩展 ACP projection                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 2   | 压缩状态主动通知（含自发压缩）   | 💤 同上                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 3   | 上下文分段明细                   | 💤 **用户定夺不实现（2026-09-25「不要动 letcode」）**。技术路径已查清且很便宜：ACP 的 `UsageUpdate` 官方预留 `_meta`（schema 1.7.0 `client.rs:504-524`），letcode `projection.rs:100-103` 那一行现成有 `event.prompt_composition`（`PromptCompositionEntry{category,estimated_tokens,segments}`，五类 system/skills/context/messages/tools）只是被丢弃——引擎侧约 15 行即可传出。**是边界选择不是技术阻塞**，详见 §15 ❾。现状只画真值（`used/size` 总量条），不编假数据 |
+| 4   | token ↑↓ / t/s                   | ✅ token ↑↓ 已实装（M10 · 客户端估算带 ≈，见 §11.6）；t/s 未做（引擎不给速率）                                                                                                                                                                                                                                                                                                                                                                                         |
+| 5   | elicitation 表单                 | ✅ 已实装（M5a，2026-09-18）：能力声明 + `elicitation/create` 面板，见 §2.5                                                                                                                                                                                                                                                                                                                                                                                            |
+| 6   | /theme、/child、/parent 等命令   | ⚠️ /theme 已由前端自管（M5c：sprout / mono 切换）；/child、/parent 仍随协议拒绝                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## 14. 里程碑映射
 
@@ -434,7 +473,7 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - M2b（**已实装**，2026-09-18）：§1.4 工具卡 v1（鼠标点击展开/收起 + 自动三态 + 输出 tail 末 8 行 + rawInput 展示；键盘选择态留 v2）
 - M2b v2（**已实装**，2026-09-18）：§1.4 键盘选择态（Tab 进出 / ↑↓ 选卡 / enter 展开收起 / esc 只退模式；选中卡头行 `▌` 强调绿；`-navtest` 状态机自检 9 条全绿）
 - M3 状态栏（**已实装**，2026-09-18）：§3 实况数据（模式徽章 / 上下文条阈值色 / 模型名·思考档 / 窄屏降级）
-- M3b 右栏（**已实装**，2026-09-18）：§4 会话信息/上下文/待办小列表 + §5 待办列表 + ctrl+b 开关 + 窄屏自动隐藏
+- M3b 右栏（**已实装**，2026-09-18；M29 收窄）：§4 会话信息 + Context 用量条（英文标题 + 满宽 █/░ 进度条 + used/size/left）+ LSPs/MCPs/Skills + ctrl+b 开关 + 窄屏自动隐藏（待办 M29 起移出右栏）
 - M4a 右缘滚动条（**已实装**，2026-09-18）：§10 竖向滚动条（1 格外挂列 + crush 几何；`-scrolltest` 几何与 View 集成自检）；顺带修正 handleClick 的右栏命中边界（计入滚动条列）
 - M4b 命令弹层（**已实装**，2026-09-18）：§7 数据接 available_commands_update（9 条引擎命令）+ 过滤 / ↑↓ / tab 补全 / enter 执行（带参数先补全）/ esc 关闭 + 窄屏降级；`-cmdtest` 22 项全绿
 - M4c 输入历史（**已实装**，2026-09-18）：§6 ↑↓ 召回发送过的内容（空输入/翻历史中才接管，有草稿仍滚消息区）；`-histtest` 12 项全绿
@@ -455,7 +494,8 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
 - M21 工作行流光 + 去约等号 + 等距分摊（**已实装**，2026-09-20 · 用户点菜 · 附两张截图）：§11.5 §11.6 —— ① 乱码块改 crush CycleColors 流光（A→B→A→B 坡道每帧滑 1 格，新增 `Theme.WorkGradA/B` 鲜艳绿两端，主色保持绿、不碰暗绿）；② token 去掉 ≈（used 是引擎广播的精确值，pi 的 extension 同样直显）；③ 四段沿整行等距分摊（`spreadSegs`，窄屏退化 `·` 紧凑连接）。取证：crush `internal/ui/anim/anim.go`（CycleColors 坡道数学）+ 本机 pi 的 `~/.pi/agent/extensions/yoshi-working-line.ts`（token 无约等号直显）。自检 `-worktest` 扩到 9 项 + `-themetest` ⑤b 坡道端点断言 —— 全量 21 套自检绿
 - M23 命令可用性收口 + `/new` 归客户端（**已实装**，2026-09-20）：① `/new` 从"prompt 透传"改走 ACP `session/new` 请求（引擎侧 `adopt_session` 不发通知，客户端再用旧 id 提问时旧会话会被 `pending_resume` "恢复"回来——prompt 走法等于被抵消）；应答带新 id，客户端 `resetSession` 清会话级视图态 + 落回执，旧会话仍可用 /resume 找回；回合中拦下（同 /resume 口径）。② `/permission` 取值别名表 `cmdValueAliases`（引擎 `permission.rs` 的 serde alias："solo" = yolo 老叫法——此前被本地护栏误拦）。③ ⑩ 测试块假断言改真断言；`engineErrorHint` 翻译进自检（五类 + 未知返回空）；死代码 `reasonGuardErr` 删除（单通道归 `engineErrorHint`）。自检 `-cmdtest` 扩 6 项；全量 22 套绿
 - M25 推理档改道 + 状态栏常驻档位（**已实装**，2026-09-20 · 用户点菜 · 附截图）：§3 §11.5 §15 ❼ —— `/reasoning <档位>` 不再当 prompt 回合发（用户口径「切换思考模式不应该显示在消息区，应该找个地方显示目前思考级别的」），改走 ACP `session/set_config_option`：成功后状态栏档位即时刷新 + 工作区一行安静收据（消息区零条目），失败落 kError 并按「可选值」分流提示；缺参数提示改用 session/new 给的可选档位表；状态栏新增「推理 <档位>」段（照本机 pi 的 statusline 扩展，档位配色见 §11.5）。真机探针 `m0 -setcfg reasoning_effort=high` 实证引擎接受（应答含 `currentValue=high` 且广播 `config_option_update`），无效值回 `-32600 "letcode rejected the session reasoning effort change"`。自检 `-cmdtest` ⑬ + `-statustest` 推理段抽查 + `-themetest` ④d；全量 22 套绿
-- M26 工具命令语法高亮（**已实装**，2026-09-25 · 跟进 crush `e41ae8e`）：§1.4 §15 ❽ —— 展开区 shell `command` 先用 Chroma bash lexer + 当前主题 token 着色，再按 token 与 grapheme 的显示宽度折行，续行自动重开前一段前景色；`x/ansi.Truncate` 兜底超宽 grapheme，不引入 `Style.Width` 的对齐填充，不加背景。`shellSyntaxStyle` 按 `themeEpoch` 缓存，切 mono 后重建为全灰。自检 `-feedtest` 覆盖 5 种前景色、续行保色、非空白内容完整、每行 ≤34 格、无背景；`-themetest` ④e 覆盖 sprout 有彩色 / mono 全灰
+- M26 工具命令语法高亮（**已实装**，2026-09-25 · 跟进 crush `e41ae8e`）：§1.4 §15 ❽ —— 展开区 shell `command` 先用 Chroma bash lexer + 当前主题 token 着色，再按 token 与 grapheme 的显示宽度折行，续行自动重开前一段前景色；`x/ansi.Truncate` 兜底超宽 grapheme，不引入 `Style.Width` 的对齐填充，不加背景。`shellSyntaxStyle` 按 `themeEpoch` 缓存，切 mono 后重建为全灰。自检：`-feedtest` 覆盖 5 种前景色、续行保色、非空白内容完整、每行 ≤34 格、无背景；`-themetest` ④e 覆盖 sprout 有彩色 / mono 全灰
+- M27 旧模型显式重绑（**已实装**，2026-09-25）：§1.5 §7 §12 §15 ㊿ —— 普通 `session/load` 继续按记录 route fail-closed；引擎以 `letcode.resume_model_unavailable` 结构化报告可继续条件；Tematcha 展示确认面板，用户确认后才通过 `_meta["letcode.dev/loadModel"]` 重发同一 session/load。成功后保持原 session/transcript 语义并记录一次 `ModelChanged`；取消、非法目标和显式失败均不自动重试。
 
 ## 15. 决策记录（Decision Log）
 
@@ -515,4 +555,7 @@ y 允许一次    a 始终允许    n 拒绝    esc 取消
   **教训入册：「利用右侧空间」是语气词不是度量词——用户嫌挤的真实意图是「别把段糊在一起」，左对齐 + 紧凑分隔即正解；要动分布先问，别自作主张摊满**。M21 的另两项（乱码流光、token 去 ≈）不受影响，保留
 - 2026-09-20 ❺ `/new` 归客户端 + 护栏别名表（用户点菜回顾 · 命令可用性排查收口）= ① **`/new` 不能当 prompt 发**：引擎侧那条路（`driver.rs` 的 `adopt_session`）只换引擎自己的当前会话、**不发任何通知**（没有 pending responder 时只写一行 debug 日志）；客户端继续用旧 id 提问时，`start_prompt` 的 `pending_resume` 分支又把旧会话整个"恢复"回来——`/new` 等于被下一次提问抵消。改走 ACP 的 `session/new` 请求：引擎装新会话、应答把新 id 带回来（`start_session` 的 `session_issued` 分支）。客户端收尾 = `resetSession()`（消息区/流式锚点/用量/待办/排队/收尾行归零；主题、右栏开关、命令表、输入历史**不清**——跟着人走不跟着会话走；`turnGen` 前进一格防迟到结果）+ 回执「已开始新会话 …（旧会话可用 /resume 找回）」；回合中拦下（同 /resume 口径）。与 `session/load` 不同：新建会话**没有历史重放**，应答可直接当普通 tea.Msg 返回、不必塞事件通道。② **护栏别名表 `cmdValueAliases`**：`/permission solo` 被本地护栏误拦——引擎 `permission.rs` 的 `Yolo` 变体带 `#[serde(alias = "solo")]` 且 `parse()` 显式接受 `"yolo" | "solo"`；新增别名表并让护栏认账——**教训：客户端白名单是引擎行为的镜像，镜像不全就等于拦下合法输入**。③ 同批收尾：⑩ 测试块里 `_ = okReasoningHigh` 式假断言改真断言（透传 / 别名放行 / 仍拦 plan 三向断言）、`engineErrorHint` 翻译进自检（五类各就位 + 未知返回空）、死代码 `reasonGuardErr`（M4e 老护栏的翻译器，改走 `engineErrorHint` 单通道后不再被引用）删除。自检 `-cmdtest` 新增 6 项断言；全量 22 套绿
 - 2026-09-20 ❻ `/reasoning` 任何档位都被拒 · 根因在 letcode 配置（用户排查取证 + 三路验证）= 用户真机反复报「high/low/off/none 无一例外全被拒」。排查链（letcode 源码）：① `agent.rs:2145` `set_reasoning_effort` 的护栏 = `selectable_reasoning_efforts()` 为空就拒绝一切档位；② `request_builder.rs:108` 该列表在 `supports_reasoning=false` 时恒空；③ `config.rs:1045` anthropic 协议下 `supports_reasoning` 还要求 `protocol_settings.anthropic_thinking.mode == "adaptive"`（`model_runtime/mod.rs:2461` 同步校验：配了 `generation.reasoning_effort(s)` 就必须 adaptive，否则 `config validate` 也报错）。即「引擎配置文件缺项」，与 tematcha 无关（拒绝文案由 `driver.rs:865` 在 `SettingChangeFailed` 时拼出）。修复（`~/.config/letcode/letcode.toml`）：补 `[.protocol_settings.anthropic_thinking]` `mode = "adaptive"`；并注释掉 anthropic 协议不接受的 `reasoning_summary` / `text_verbosity`（`model_runtime/mod.rs:2682/2692`，仅 responses 协议可用）。验证三路：`letcode config validate` PASS；REPL `letcode --cli` 回「reasoning effort set to high」；ACP（`go run ./m0 -prompt "/reasoning high"`）的 `config_option_update` 里 `reasoning_effort` current=high、options=none/low/medium/high/max。客户端同批升级：`engineErrorHint` 的 reasoning 分支改为直接指向配置病根（anthropic 协议需 adaptive，缺了它任何档位都会被拒），`-cmdtest` ⑪ 追加 "adaptive" 断言；全量 22 套绿
-- 2026-09-20 ❼ 推理档改道 + 状态栏常驻档位（M25 · 用户点菜 · 附截图）= **「切换思考模式不应该显示在这里，应该找个地方去显示目前思考级别的（我就说应该学 pi 的 extension 的 statusline）」**：两件事一次做——① **通道改造**：`/reasoning <档位>` 此前当 prompt 回合发给引擎（引擎自己识别命令），观感是消息区多一条用户消息 + 多一个回合；现在 submit 里由 `reasoningArg` 识别（只认 `/reasoning` + 非空参数），在 cmdGuard 之后、回显/开回合之前拦下，改走 ACP 的 `session/set_config_option`（`configId = reasoning_effort`；`acp_client.go` 新增 `SetConfigOption`），`cfgSetMsg` 收尾：成功 → 用引擎确认后的 configOptions 刷新档位/模型/模式 + 工作区安静收据「推理档 → xhigh」（`closeOK`；消息区零条目、不占回合、不回显）；失败 → kError（可选列表在手时直接报「不在可选范围（可选 …）」；没有列表才退回 `engineErrorHint` 的 adaptive 配置指引）。回合进行中拦下（同 /compact 口径）。② **状态栏常驻**：新增「推理 <档位>」段（挂模型段之后，窄屏降级最先让位），档位配色照本机 pi statusline 扩展 `getEffortColor`（§11.5 新 token 五档）；引擎没给档位（会话/模型不提供 reasoning_effort）时整段缺席、不占位。③ **缺参数提示升级**：`/reasoning` 空参数不再报广告 hint，改报「当前 <档位>，可选 <引擎给的可选值>」——真机实证广告 hint（`off|none|minimal|low|medium|high|xhigh`）与实际可选集（`none|low|medium|high|max`）不一致，报幽灵档位会把用户带沟里。④ **真机取证**（M25 新增探针 `m0 -setcfg`）：`reasoning_effort=high` 应答 `currentValue=high` 且随后广播 `config_option_update`（客户端两条路都会刷新，幂等）；无效值回 `-32600 "letcode rejected the session reasoning effort change"`（通用拒绝文案——所以客户端自己把可选项报出来）。自检 `-cmdtest` ⑬（护栏文案 / 归客户端路由 / busy 拦截 / cfgSet 成功与失败两路）+ `-statustest` 五档 SGR + 缺席语义 + `-themetest` ④d；全量 22 套绿
+- 2026-09-20 ❼ 推理档改道 + 状态栏常驻档位（M25 · 用户点菜 · 附截图）= **「切换思考模式不应该显示在这里，应该找个地方去显示目前思考级别的（我就说应该学 pi 的 extension 的 statusline）」**：两件事一次做——① **通道改造**：`/reasoning <档位>` 此前当 prompt 回合发给引擎（引擎自己识别命令），观感是消息区多一条用户消息 + 多一个回合；现在 submit 里由 `reasoningArg` 识别（只认 `/reasoning` + 非空参数），在 cmdGuard 之后、回显/开回合之前拦下，改走 ACP `session/set_config_option`（`configId = reasoning_effort`；`acp_client.go` 新增 `SetConfigOption`），`cfgSetMsg` 收尾：成功 → 用引擎确认后的 configOptions 刷新档位/模型/模式 + 工作区安静收据「推理档 → xhigh」（`closeOK`；消息区零条目、不占回合、不回显）；失败 → kError（可选列表在手时直接报「不在可选范围（可选 …）」；没有列表才退回 `engineErrorHint` 的 adaptive 配置指引）。回合进行中拦下（同 /compact 口径）。② **状态栏常驻**：新增「推理 <档位>」段（挂模型段之后，窄屏降级最先让位），档位配色照本机 pi statusline 扩展 `getEffortColor`（§11.5 新 token 五档）；引擎没给档位（会话/模型不提供 reasoning_effort）时整段缺席、不占位。③ **缺参数提示升级**：`/reasoning` 空参数不再报广告 hint，改报「当前 <档位>，可选 <引擎给的可选值>」——真机实证广告 hint（`off|none|minimal|low|medium|high|xhigh`）与实际可选集（`none|low|medium|high|max`）不一致，报幽灵档位会把用户带沟里。④ **真机取证**（M25 新增探针 `m0 -setcfg`）：`reasoning_effort=high` 应答 `currentValue=high` 且随后广播 `config_option_update`（客户端两条路都会刷新，幂等）；无效值回 `-32600 "letcode rejected the session reasoning effort change"`（通用拒绝文案——所以客户端自己把可选项报出来）。自检：`-cmdtest` ⑬（护栏文案 / 归客户端路由 / busy 拦截 / cfgSet 成功与失败两路）+ `-statustest` 五档 SGR + 缺席语义 + `-themetest` ④d；全量 22 套绿
+- 2026-09-25 ㊿ M27 旧模型显式重绑 = **普通恢复继续 fail-closed，只有明确确认才允许换 route**：根因是 letcode 在 transcript 恢复前按记录的 provider-qualified model route 做本地准备，旧 route 不在当前 catalog 时会在任何 API 请求和 live 状态提交之前失败。M27 不把这个契约改成静默 fallback，而是让引擎在 `error.data` 返回 `letcode.resume_model_unavailable`、原模型、当前模型和可继续标志；Tematcha 展示确认面板，确认后用 namespaced `_meta` 的 `letcode.dev/loadModel` 重发同一个 `session/load`。显式路径先完整准备目标 route 和恢复快照，再原子替换 live recorder/Agent，成功后保留原 session、branch、history、compaction、children，并在 transcript 追加一次 `ModelChanged`；取消和失败都不自动重试。目标模型的 reasoning、图片及其它 request metadata 重新决定请求投影，能力不匹配的历史图片降级为占位文本。
+  自检：`-todostest` 扩到 6 项（新增 ctrl+t 走真实 `handleKey` 断言）、`-paneltest` 加 Context 三档样张与标题断言；**全量 22 套绿 + gofmt/vet/build exit 0**。**2026-09-25 追加两条同批收尾**：① **收尾行离输入框太近**（用户点菜「一气呵成 · 7s 距离下面的输入太近了，拉远一点」）—— View 的 bottom 序列在 `workStripLines` 与输入块之间**恒插一个空行**（有无收尾行都在，保证输入框不贴住上一块）；`syncLayout` 底部常数 6 → 7；`handleClick` 的 `inputTop` 同步 +1（改底部行数/宽度时这三处联动）。② **Context 分段明细经用户定决不实现**（「不要动 letcode」）—— 技术路径其实很便宜（见 §13 #3 与 §15 ❾），但用户选择不碰引擎，右栏保持真值总量条
+- 2026-09-25 ❾ 上下文分段明细 · **技术可行但用户定决不做**（边界选择，非技术阻塞）= 前一轮"拿不到"的结论**不准确，已更正**：① ACP 官方给 `UsageUpdate` 预留了 `_meta`（schema 1.7.0 `client.rs:504-524`，注释「reserved by ACP to allow clients and agents to attach additional metadata」+ 现成 `.meta()` builder），与 M27 的 `letcode.dev/loadModel` 同一机制；② letcode `acp/projection.rs:100-103` 组装 `UsageUpdate::new(used, size)` 的同一行上，`event.prompt_composition` 现成却被丢弃（类型 `request_builder/prompt_plan.rs:463-471` 的 `PromptCompositionEntry{category, estimated_tokens, segments}`，五类 system/skills/context/messages/tools；`session/event.rs:159-168` 的 `TokenUsageEvent` 持有它，`runner.rs:841` / `restore.rs:518,695` 填充）。③ 引擎侧约 15 行即可传出，**无需 fork schema、无需升级 ACP crate**。**用户原话「不要动 letcode 噢。那如果拿不到那就算了」→ 就此搁置**。教训入册：这里的"拿不到"是**边界选择**而非能力上限——下次遇到"客户端拿不到 X"先查协议有没有预留扩展位（`_meta`）再下结论；同时**动上游引擎必须单独征求同意**（本项目已有 store.rs 记忆补丁与 M27 两次先例），不能因为"只改 15 行"就顺手做。将来若用户改主意：letcode 加 `_meta["letcode.dev/contextUsage"]`（inputTokens/outputTokens/cachedTokens + composition 数组）→ Tematcha 渲染六行图例（● 系统提示/技能/上下文资料/消息/工具/剩余容量）+ 分段条，**且必须优雅降级**（拿不到扩展就退回现有总量条）

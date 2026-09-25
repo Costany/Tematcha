@@ -229,14 +229,14 @@ func (m *model) syncLayout() {
 	elicitH := len(m.renderElicitPanel(m.bottomW())) // M5a：追问表单也钉在输入区上方
 	cmdH := len(m.renderCmdPalette())                // M4b：命令弹层也钉在输入区上方，一起让位
 	sessH := len(m.renderSessionPicker())            // M4d：会话选择列表同理
-	// M5b：钉面板（# Todos）钉在消息区顶部、不参与滚动——占几行就扣几行。
-	// 先定宽度再算它（渲染器要宽度参数；行数只由待办条数决定，顺序别反）。
+	rebindH := len(m.renderResumeRebind())           // M27：显式模型重绑确认同理
+	// M5b / M29：To-Do 卡片钉在消息区底部、不参与滚动——占几行就扣几行。
 	todosH := len(m.renderTodosPinned(w))
 	// M11：工作区（输入栏上方的一行：工作行 / 压缩进度条 / 收尾行）也占高度。
 	workH := len(m.workStripLines())
-	// 底部固定行 = 顶部空白 1 + 消息区后空白 1 + 输入区 3（两线一行）+ 状态栏
-	// 信息行 1 + 快捷键提示行 1 = 7（2026-09-20 提示行从状态栏拆出，6 → 7）。
-	h := m.height - 7 - workH - panelH - elicitH - cmdH - sessH - todosH
+	// 底部固定行 = 顶部空白 1 + 消息区后空白 1 + 输入区上方呼吸空行 1（M29）+ 输入区 2
+	// （一行输入 + 一条底线）+ 状态栏信息行 1 + 快捷键提示行 1 = 7。
+	h := m.height - 7 - workH - panelH - elicitH - cmdH - sessH - rebindH - todosH
 	if h < 3 {
 		h = 3
 	}

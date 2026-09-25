@@ -1,8 +1,11 @@
-// ui_panel.go —— 右栏（M3b · §4/§5：会话信息 / 上下文 / 待办）
+// ui_panel.go —— 右栏（M3b · §4：会话信息 / Context 用量）+ To-Do 卡片
 //
 // 布局：消息区右侧一条「  │ 」分隔列 + 固定宽度的信息栏；消息区宽度在
 // syncLayout 里让位。窄屏（< minPanelWidth）自动隐藏，宽了恢复；ctrl+b
 // 手动开关（见 main.handleKey）。
+//
+// M29 起待办从右栏搬走：右栏只留会话信息与 Context 用量条；待办变成
+// 消息区底部的 To-Do 卡片（见本文件后半段的 M5b/M29 段，ctrl+t 收起）。
 //
 // 数据来源（ACP，字段名已对 schema 1.7.0 核对）：
 //   - 会话标题：session_info_update {title}
@@ -18,6 +21,7 @@ import (
 	"os"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -68,16 +72,35 @@ func (m model) panelDoneCount() (done, total int) {
 	return done, len(m.todos)
 }
 
-// todoMark 待办状态字形与配色：○ 待办 / ◐ 进行中 / ✓ 完成。
+// todoMark 待办状态字形与配色（照 Crush 截图）：✓ 完成（绿）/ ◐ 进行中 / ○ 待办。
 func todoMark(status string) (string, lipgloss.Style) {
 	switch status {
 	case "in_progress":
-		return "\u25D0", thinkStyle
+		return "◐", thinkStyle
 	case "completed":
-		return "\u2713", dimStyle
+		return "✓", toolOKStyle
 	default:
-		return "\u25CB", textStyle
+		return "○", dimStyle
 	}
+}
+
+// todoText 待办正文的配色：已完成的降为暗色（办完的别抢眼），其余走正文色。
+func todoText(status string) lipgloss.Style {
+	if status == "completed" {
+		return dimStyle
+	}
+	return textStyle
+}
+
+// currentTodoContent 当前进行中那条待办的文字（卡片收起时接在标题行后面；
+// 没有进行中的就返回空串——不猜、不拿已完成的第一条顶替）。
+func (m model) currentTodoContent() string {
+	for _, t := range m.todos {
+		if t.Status == "in_progress" {
+			return t.Content
+		}
+	}
+	return ""
 }
 
 // panelRule 右栏分区标题行：标签 + 横线补满到 panelContentW（如「上下文 ─────」）。
@@ -90,7 +113,34 @@ func panelRule(label string) string {
 	return panelLabelStyle.Render(label) + " " + ruleStyle.Render(strings.Repeat("─", fill))
 }
 
-// panelScrollbar 右栏竖向滚动条列（M17）：数学与消息区 Scrollbar 同款
+// renderContextMeter 右栏 Context 段的用量进度条：整宽一条，█ = 已占用、
+// ░ = 剩余（与状态栏的 miniBar 同语义，只是放大到 panelContentW）。
+// 填充色沿用 §3 的同一套阈值：<60% 柔绿、≥60% 琥珀、≥85% 柔红。
+// 百分比取 shownPct（压缩后缓动显示，动画中 = barPct）。
+func (m model) renderContextMeter() string {
+	w := panelContentW
+	pct := m.shownPct()
+	fill := pct * w / 100
+	if fill > w {
+		fill = w
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	st := toolOKStyle
+	switch {
+	case pct >= 85:
+		st = toolErStyle
+	case pct >= 60:
+		st = warnStyle
+	}
+	var b strings.Builder
+	b.WriteString(st.Render(strings.Repeat("█", fill)))
+	b.WriteString(ruleStyle.Render(strings.Repeat("░", w-fill)))
+	return b.String()
+}
+
+// panelScrollbar 右栏竖向滚动条列（M17）
 // （照 crush internal/ui/common/scrollbar.go），拇指 = Theme.ScrollThumb。
 //
 // off = 距顶行数（0 = 贴顶，右栏信息面板默认贴顶——品牌行/目录/标题最常看）。
@@ -196,23 +246,33 @@ func (m model) renderPanel(height int) []string {
 	}
 	out = append(out, "")
 
-	// ④ 上下文（2026-09-19 用户点菜：横线行 + 无条件显示）
-	//   原来 usageSize==0 时整段省略——用户截图发现"上下文呢"，故改为恒显示。
+	// ④ 上下文（2026-09-19 恒显示；2026-09-25 用户点菜：标题改英文 Context
+	//   并加一条真实用量进度条）。
+	//
+	//   取证（为什么只有一条总量条、没有"工具/消息/提示词"的分段色）：ACP 的
+	//   usage_update 只有 used / size 两个数（letcode acp/projection.rs:96-103
+	//   的 TokenUsageEvent 投影）；引擎内部那套分类构成（system / skills /
+	//   context / messages / tools 的 prompt_composition，见
+	//   request_builder/prompt_plan.rs:463-470）在投影层被整个丢掉，标准协议里
+	//   没有它的容身处。拿本地字符数冒充引擎的分类只会得到假账——所以这里只画
+	//   真值：已用 / 窗口。要真分段得先扩引擎的 ACP 扩展，那是另一件事。
+	//
 	//   无数据时的占位文案：引擎只在"有 token 活动"后才广播 usage
 	//   （session/new 与 session/load 的应答结构体都没有 usage 字段，
 	//   projection.rs 的 UsageUpdate 只由 TokenUsage/SessionTokenUsage 触发），
 	//   所以新建或 /resume 载入后、首次对话前必然拿不到——说清楚比画个
 	//   破折号友好。横线 = 标签 + U+2500 补满 panelContentW。
-	out = append(out, panelRule("上下文"))
+	out = append(out, panelRule("Context"))
 	if m.usageSize > 0 {
-		out = append(out, panelValIDStyle.Render(fmtK(m.usageUsed)+" / "+fmtK(m.usageSize)))
+		out = append(out, m.renderContextMeter())
 		rest := m.usageSize - m.usageUsed
 		if rest < 0 {
 			rest = 0
 		}
-		out = append(out, dimStyle.Render("剩余 "+fmtK(rest)))
+		out = append(out, dimStyle.Render(clipWidth(
+			fmtK(m.usageUsed)+" / "+fmtK(m.usageSize)+" · left "+fmtK(rest), panelContentW)))
 	} else {
-		out = append(out, dimStyle.Render("对话后显示"))
+		out = append(out, dimStyle.Render("after first turn"))
 	}
 	out = append(out, "")
 
@@ -223,34 +283,6 @@ func (m model) renderPanel(height int) []string {
 		out = append(out, panelRule(k))
 		out = append(out, dimStyle.Render("None"))
 		out = append(out, "")
-	}
-
-	// ④ 待办（空则整节省略；放不下时截断 + 溢出提示）
-	if len(m.todos) > 0 {
-		done, total := m.panelDoneCount()
-		out = append(out, panelLabelStyle.Render(fmt.Sprintf("待办 %d/%d", done, total)))
-		room := height - len(out)
-		shown := m.todos
-		overflow := 0
-		if room > 0 && len(shown) > room {
-			keep := room - 1 // 留一行给溢出提示
-			if keep < 0 {
-				keep = 0
-			}
-			overflow = len(shown) - keep
-			shown = shown[:keep]
-		}
-		for _, t := range shown {
-			mark, st := todoMark(t.Status)
-			cst := textStyle
-			if t.Status == "completed" {
-				cst = dimStyle
-			}
-			out = append(out, st.Render(mark)+" "+cst.Render(clipWidth(t.Content, panelW-2)))
-		}
-		if overflow > 0 {
-			out = append(out, dimStyle.Render(fmt.Sprintf("… 还有 %d 条", overflow)))
-		}
 	}
 
 	// 补齐 / 截断到 height
@@ -300,6 +332,53 @@ func runPanelTest() {
 	}
 
 	fmt.Println()
+	fmt.Println("== Context 用量条（M29：英文标题 + 真实 used/size 进度条）==")
+	okMeter := true
+	for _, c := range []struct {
+		used, size int64
+	}{{87300, 320000}, {200000, 320000}, {300000, 320000}} {
+		cm := model{usageUsed: c.used, usageSize: c.size}
+		meter := stripANSI(cm.renderContextMeter())
+		w := lipgloss.Width(meter)
+		if w != panelContentW {
+			okMeter = false
+		}
+		fmt.Printf("  %6d / %6d  %s  (w=%d)\n", c.used, c.size, meter, w)
+	}
+	if !okMeter {
+		bad = true
+		fmt.Println("  !! 进度条宽度不等于 panelContentW")
+	}
+
+	fmt.Println()
+	fmt.Println("== 输入区（M29 ① 单底线 ②③ 提示符两态）==")
+	fm := model{width: 100, feed: NewFeed(), status: stIdle, inputFocused: true}
+	fm.feed.SetSize(60, 10)
+	ibOn := strings.Split(fm.renderInputBlock(), "\n")
+	fm.inputFocused = false
+	ibOff := strings.Split(fm.renderInputBlock(), "\n")
+	// 两态各两行（输入 + 底线）、每行等宽、前缀恒 promptW 格、单底线（末行是 ─）
+	// 注意输入块整行带 2 格左缩进，比对提示符前要先剥掉
+	onHead := strings.TrimPrefix(stripANSI(ibOn[0]), "  ")
+	offHead := strings.TrimPrefix(stripANSI(ibOff[0]), "  ")
+	okPrompt := len(ibOn) == 2 && len(ibOff) == 2 &&
+		lipgloss.Width(ibOn[1]) == lipgloss.Width(ibOn[0]) &&
+		lipgloss.Width(ibOff[1]) == lipgloss.Width(ibOff[0]) &&
+		strings.HasPrefix(onHead, promptFocused) && strings.HasPrefix(offHead, promptBlurred) &&
+		lipgloss.Width(promptFocused) == promptW && lipgloss.Width(promptBlurred) == promptW &&
+		strings.Count(ibOn[1], "─") == fm.blockWidth() &&
+		!strings.Contains(onHead, "─")
+	for _, ln := range []string{onHead, offHead, strings.TrimPrefix(stripANSI(ibOn[1]), "  ")} {
+		fmt.Printf("  |%s|\n", ln)
+	}
+	if !okPrompt {
+		bad = true
+		fmt.Println("  !! 提示符两态 / 单底线 / 宽度守恒 断言失败")
+	} else {
+		fmt.Println("  OK 两行（输入 + 底线）、前缀恒 4 格、聚焦 ❯ / 失焦 :::")
+	}
+
+	fmt.Println()
 	fmt.Println("== panelVisible 判定 ==")
 	for _, c := range []struct {
 		w    int
@@ -345,7 +424,9 @@ func runPanelTest() {
 		strings.Contains(plain, "集成样张") &&
 		strings.Contains(plain, "标识 ") &&
 		strings.Contains(plain, "模型 ") &&
-		strings.Contains(plain, "模式 ")
+		strings.Contains(plain, "模式 ") &&
+		// M29：右栏标题改英文 Context，中文「上下文」不该再出现
+		strings.Contains(plain, "Context") && !strings.Contains(plain, "上下文")
 	okWidth := true
 	for _, ln := range lines {
 		if lipgloss.Width(ln) > vm.width {
@@ -354,11 +435,11 @@ func runPanelTest() {
 		}
 	}
 	// M20（2026-09-20 用户点菜「输入框不要沾满整个终端的宽度，右边的侧边栏要
-	// 截断他」）：① 输入框三行（两线一行）各自 = 左列宽（消息区宽 + 滚动条列），
-	// 不再沾满终端；② 组成后的输入行带右栏分隔列（侧栏一路延伸到底）且不满宽；
-	// ③ 状态栏/提示行（最后两行）才满宽（照 crush 的 help 行）。
+	// 截断他」）：① 输入区两行（输入行 + 单底线，M29 后）各自 = 左列宽（消息区宽 +
+	// 滚动条列），不再沾满终端；② 组成后的输入行带右栏分隔列（侧栏一路延伸到底）
+	// 且不满宽；③ 状态栏/提示行（最后两行）才满宽（照 crush 的 help 行）。
 	ibLines := strings.Split(vm.renderInputBlock(), "\n")
-	okIB := len(ibLines) == 3
+	okIB := len(ibLines) == 2
 	for _, ln := range ibLines {
 		if lipgloss.Width(ln) != vm.feed.width+scrollBarW {
 			okIB = false
@@ -404,66 +485,120 @@ func runPanelTest() {
 }
 
 // ---------------------------------------------------------------------------
-// M5b：消息区钉面板（# Todos）
+// M5b / M29：To-Do 卡片（消息区底部、输入区之上；照 Crush 的 To-Do pill）
 // ---------------------------------------------------------------------------
 
-// todosMaxRows 钉面板最多显示几条待办（超出的折成一行「… 还有 N 条」）。
+// todosMaxRows 卡片里最多列几条待办（超出的折成一行「… N more」）。
 const todosMaxRows = 6
 
-// isTodosToggle 输入是否正好是 /todos（客户端命令：开关钉面板，不发引擎）。
+// isTodosToggle 输入是否正好是 /todos（客户端命令：整张卡片的显隐，不发引擎）。
 // 注意：letcode 的命令表里没有 /todos，不拦的话它会被当成普通提问发给模型。
 func isTodosToggle(text string) bool {
 	return strings.TrimSpace(text) == "/todos"
 }
 
-// todosVisible 钉面板是否显示：开关开着且快照里确实有待办。
+// todosVisible 卡片是否显示：开关开着且快照里确实有待办。
 func (m model) todosVisible() bool {
 	return m.todosOn && len(m.todos) > 0
 }
 
-// renderTodosPinned 渲染消息区顶部的钉面板（不随消息区滚动消失）：
+// toggleTodosExpanded 收起 / 展开待办列表（M29；ctrl+t 走它）。
+// 快照为空时不动 —— 没有东西可展开，别让一个空壳卡片占掉输入区的位置。
+func (m *model) toggleTodosExpanded() {
+	if len(m.todos) == 0 {
+		return
+	}
+	m.todosOpen = !m.todosOpen
+	m.syncLayout() // 列表行数变了 → 消息区高度要重算
+}
+
+// todoCardRow 把一行内容包进左右边框，内容区两侧各留 1 格内边距（照 Crush 的
+// Padding(0,1)）。contentW = 卡片总宽 - 3（两个边框列 + 左侧内边距）；不足的
+// 宽度补到右内边距上，于是每一行的右竖线都落在同一列。
+func todoCardRow(content string, contentW int) string {
+	pad := contentW - lipgloss.Width(content)
+	if pad < 0 {
+		pad = 0
+	}
+	return ruleStyle.Render("│") + " " + content + strings.Repeat(" ", pad) + ruleStyle.Render("│")
+}
+
+// renderTodosPinned 渲染 To-Do 卡片（钉在消息区底部，不随消息区滚动消失），
+// 照 Crush 的 To-Do pill：圆角边框的标题行 + 框内的任务列表。
 //
-//	# Todos · 1/4
-//	  ○ 读取 demo-lab 的目录结构
-//	  ◐ 把 README 第一行改成标题
-//	  ✓ 运行 npm test 验证
+//	╭── To-Do  1/4                       ctrl+t close ──╮
+//	│  ✓ 读取 demo-lab 的目录结构                        │
+//	│  ◐ 把 README.md 的第一行改成标题                    │
+//	╰────────────────────────────────────────────────────╯
 //
-// 透明度原则：只前景色；标题暗色、正文浅色、完成项暗色。宽度按显示宽裁剪。
-// 篇幅：最多 todosMaxRows 条 + 一行溢出提示。
+// 状态机分两层，照 Crush 的 pills：todosOn 管整张卡片在不在（/todos 切换）；
+// todosOpen 管列表展不展开（ctrl+t 切换）——收起时只剩标题行一行，并把当前
+// 进行中的任务接在计数后面（Crush 收起态就是标题行后面接当前任务）。
+// 透明度原则：只前景色、无背景色；边框走 ruleStyle。
 func (m model) renderTodosPinned(w int) []string {
 	if !m.todosVisible() {
 		return nil
 	}
-	if w < 12 {
-		w = 12
+	if w < 24 {
+		w = 24
+	}
+	// contentW = 卡片总宽 - 3（两个边框列 + 左内边距 1 格）
+	contentW := w - 3
+	if contentW < 8 {
+		contentW = 8
 	}
 	done, total := m.panelDoneCount()
-	out := []string{dimStyle.Render(fmt.Sprintf("# Todos \u00B7 %d/%d", done, total))}
-	shown := m.todos
-	overflow := 0
-	if len(shown) > todosMaxRows {
-		overflow = len(shown) - todosMaxRows
-		shown = shown[:todosMaxRows]
-	}
-	for _, t := range shown {
-		mark, st := todoMark(t.Status)
-		cst := textStyle
-		if t.Status == "completed" {
-			cst = dimStyle
+
+	// 标题行：左 = To-Do x/y（收起时再接当前任务），右 = ctrl+t 开关提示
+	action := "ctrl+t close"
+	head := fmt.Sprintf("To-Do  %d/%d", done, total)
+	if !m.todosOpen {
+		action = "ctrl+t open"
+		if cur := m.currentTodoContent(); cur != "" {
+			head += "  " + cur
 		}
-		out = append(out, "  "+st.Render(mark)+" "+cst.Render(clipWidth(t.Content, w-4)))
 	}
-	if overflow > 0 {
-		out = append(out, "  "+dimStyle.Render(fmt.Sprintf("\u2026 还有 %d 条", overflow)))
+	// 左段先裁到给右段留够位置（窄屏时牺牲左边，不动开关提示）
+	budget := contentW - lipgloss.Width(action) - 2
+	if budget < 8 {
+		budget = 8
 	}
+	left := clipWidth(head, budget)
+	// 留 1 格右内边距（-1），让「ctrl+t close」不贴着右边框
+	gap := contentW - lipgloss.Width(left) - lipgloss.Width(action) - 1
+	if gap < 1 {
+		gap = 1
+	}
+
+	out := []string{ruleStyle.Render("╭" + strings.Repeat("─", w-2) + "╮")}
+	out = append(out, todoCardRow(
+		textStyle.Render(left)+strings.Repeat(" ", gap)+dimStyle.Render(action), contentW))
+
+	if m.todosOpen {
+		shown := m.todos
+		overflow := 0
+		if len(shown) > todosMaxRows {
+			overflow = len(shown) - todosMaxRows
+			shown = shown[:todosMaxRows]
+		}
+		for _, t := range shown {
+			mark, st := todoMark(t.Status)
+			out = append(out, todoCardRow(
+				st.Render(mark)+" "+todoText(t.Status).Render(clipWidth(t.Content, contentW-2)), contentW))
+		}
+		if overflow > 0 {
+			out = append(out, todoCardRow(dimStyle.Render(fmt.Sprintf("… %d more", overflow)), contentW))
+		}
+	}
+	out = append(out, ruleStyle.Render("╰"+strings.Repeat("─", w-2)+"╯"))
 	return out
 }
 
 // ---------------------------------------------------------------------------
-// -todostest：钉面板自检（渲染 / 超长截断 / 开关 / 布局 / View 集成）
+// -todostest：To-Do 卡片自检（渲染 / ctrl+t 收起 / /todos 显隐 / 布局 / View 集成）
 // ---------------------------------------------------------------------------
 
-// runTodosTest 断言 M5b 钉面板的渲染、开关、高度让位与 /todos 拦截。
+// runTodosTest 断言 To-Do 卡片的渲染、ctrl+t 收起、/todos 显隐与高度让位。
 func runTodosTest() {
 	failed := false
 	check := func(name string, cond bool) {
@@ -482,40 +617,65 @@ func runTodosTest() {
 		{Content: "提交改动并总结", Status: "pending"},
 	}
 
-	// ① 渲染：# Todos · 计数 + ○/◐/✓ 标记 + 宽度合规 + 无背景色
-	m := model{width: 100, feed: NewFeed(), status: stIdle, todosOn: true, todos: sample}
+	// ① 展开态：圆角外框 + To-Do 1/4 + ctrl+t close + ○/◐/✓ + 宽度恒等 + 无背景色
+	m := model{width: 100, feed: NewFeed(), status: stIdle,
+		todosOn: true, todosOpen: true, todos: sample}
 	m.feed.SetSize(m.width-6, 20)
 	lines := m.renderTodosPinned(m.feed.width)
 	joined := stripANSI(strings.Join(lines, "\n"))
-	okHead := len(lines) == 5 && strings.Contains(stripANSI(lines[0]), "# Todos \u00B7 1/4")
-	okMarks := strings.Contains(joined, "\u2713") && strings.Contains(joined, "\u25D0") && strings.Contains(joined, "\u25CB")
+	want := 2 + len(sample) + 1 // 上下边框 + 标题行 + 列表
+	okFrame := strings.HasPrefix(joined, "╭") &&
+		strings.HasSuffix(stripANSI(lines[len(lines)-1]), "╯") &&
+		strings.Contains(joined, "│")
+	okHead := len(lines) == want && strings.Contains(joined, "To-Do  1/4") &&
+		strings.Contains(joined, "ctrl+t close") && !strings.Contains(joined, "#")
+	okMarks := strings.Contains(joined, "✓") && strings.Contains(joined, "◐") && strings.Contains(joined, "○")
 	okW, okBG := true, true
 	for _, ln := range lines {
-		if lipgloss.Width(ln) > m.feed.width {
+		if lipgloss.Width(ln) != m.feed.width {
 			okW = false
 		}
 		if hasStrayBackground(ln) {
 			okBG = false
 		}
 	}
-	fmt.Println("== 钉面板样张（宽 100）==")
+	fmt.Println("== To-Do 卡片样张（展开，宽 100）==")
 	for _, ln := range lines {
 		fmt.Printf("  %s\n", stripANSI(ln))
 	}
-	check("渲染：# Todos · 1/4 + ○/◐/✓ 标记 / 宽度合规 / 无背景色", okHead && okMarks && okW && okBG)
+	check("展开：圆角外框 / To-Do 1/4 / ctrl+t close / 无 # / 宽度恒等 / 无背景色", okFrame && okHead && okMarks && okW && okBG)
 
-	// ② 超长列表：最多 6 条 + 「… 还有 N 条」
+	// ② 超长列表：最多 6 条 + 末行「… 4 more」
 	many := make([]TodoEntry, 10)
 	for i := range many {
 		many[i] = TodoEntry{Content: fmt.Sprintf("待办第 %d 条", i+1), Status: "pending"}
 	}
 	m.todos = many
 	lines = m.renderTodosPinned(m.feed.width)
-	okCap := len(lines) == 1+todosMaxRows+1 && strings.Contains(stripANSI(lines[len(lines)-1]), "还有 4 条")
-	check("超长列表：最多 6 条 + 末行「… 还有 4 条」", okCap)
+	okCap := len(lines) == 2+todosMaxRows+2 &&
+		strings.Contains(stripANSI(lines[len(lines)-2]), "… 4 more")
+	check("超长列表：最多 6 条 + 倒数第二行「… 4 more」", okCap)
 
-	// ③ /todos 开关：收起/展开；不发引擎、不新开回合
-	m.todos = sample
+	// ③ ctrl+t 收起：只剩标题行，提示变 open，并把当前进行中的任务接在计数后
+	m.todos, m.todosOpen = sample, true
+	nm, _ := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	cm := nm.(model)
+	closed := stripANSI(strings.Join(cm.renderTodosPinned(cm.feed.width), "\n"))
+	okClose := !cm.todosOpen && len(cm.renderTodosPinned(cm.feed.width)) == 3 &&
+		strings.Contains(closed, "ctrl+t open") && strings.Contains(closed, "To-Do  1/4") &&
+		strings.Contains(closed, "把 README.md") && !strings.Contains(closed, "读取 demo-lab")
+	fmt.Println("== ctrl+t 收起后 ==")
+	for _, ln := range cm.renderTodosPinned(cm.feed.width) {
+		fmt.Printf("  %s\n", stripANSI(ln))
+	}
+	// 再按一次 ctrl+t 回到展开
+	nm2, _ := cm.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	cm2 := nm2.(model)
+	okReopen := cm2.todosOpen && len(cm2.renderTodosPinned(cm2.feed.width)) == 2+len(sample)+1
+	check("ctrl+t：收起（只剩标题行 + 当前任务 + open）/ 再按回展开", okClose && okReopen)
+
+	// ④ /todos 显隐：整张卡片开/关；不发引擎、不新开回合
+	m.todos, m.todosOpen = sample, true
 	m.input.SetText("/todos")
 	next, cmd := m.submit()
 	m = next.(model)
@@ -523,13 +683,14 @@ func runTodosTest() {
 	m.input.SetText("/todos")
 	next, _ = m.submit()
 	m = next.(model)
-	okOn := m.todosOn && len(m.renderTodosPinned(m.feed.width)) == 5
-	check("/todos：收起/展开；不发引擎（sent 为空）、不新开回合", okOff && okOn)
+	okOn := m.todosOn && len(m.renderTodosPinned(m.feed.width)) == 2+len(sample)+1
+	check("/todos：整卡收起/展开；不发引擎（sent 为空）、不新开回合", okOff && okOn)
 
-	// ④ 布局：钉面板占几行、消息区就让几行；View 行数不变且钉面板在消息区顶部
+	// ⑤ 布局：卡片占几行、消息区就让几行；View 行数不变且卡片在消息区底部
 	vm := model{
-		width: 120, height: 30, feed: NewFeed(), status: stIdle, panelOn: true, todosOn: true, todos: sample,
-		sessTitle: "钉面板集成样张", modelLabel: "Step 3.7 Flash", modeID: "default",
+		width: 120, height: 30, feed: NewFeed(), status: stIdle, panelOn: true,
+		todosOn: true, todosOpen: true, todos: sample,
+		sessTitle: "To-Do 卡片集成样张", modelLabel: "Step 3.7 Flash", modeID: "default",
 	}
 	vm.syncLayout()
 	pinnedH := len(vm.renderTodosPinned(vm.feed.width))
@@ -537,30 +698,32 @@ func runTodosTest() {
 	vm.todosOn = false
 	vm.syncLayout()
 	hWithout := vm.feed.height
-	check("布局：钉面板占几行、消息区就让几行", pinnedH == 5 && hWith+pinnedH == hWithout)
+	okLayout := hWith+pinnedH == hWithout
 
 	vm.todosOn = true
 	vm.syncLayout()
 	content := vm.View().Content
 	vlines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	okRows := len(vlines) == vm.height
-	// 钉面板钉在消息区底部（2026-09-19 搬家：顶部 → 底部，照 Claude Code）：
-	// 标题行紧跟在消息行之后（索引 = 顶部留白 1 行 + feed 高），之后还有输入区/状态栏
+	// 卡片钉在消息区底部（2026-09-19 搬家：顶部 → 底部，照 Claude Code）：
+	// 卡片第 0 行是圆角上边框、第 1 行才是带 To-Do 计数的标题行，所以
+	// 标题行索引 = 顶部留白 1 行 + feed 高 + 边框 1 行
 	hdr := -1
 	for i, ln := range vlines {
-		if strings.Contains(stripANSI(ln), "# Todos") {
+		if strings.Contains(stripANSI(ln), "To-Do  1/4") {
 			hdr = i
 			break
 		}
 	}
-	okBottom := hdr == 1+vm.feed.height && hdr+pinnedH <= len(vlines)
+	okBottom := hdr == 1+vm.feed.height+1 && hdr+pinnedH <= len(vlines)
 	okW2 := true
 	for _, ln := range vlines {
 		if lipgloss.Width(ln) > vm.width {
 			okW2 = false
 		}
 	}
-	check("View 集成：行数不变 / 钉面板在消息区底部（Claude Code 式）/ 宽度合规", okRows && okBottom && okW2)
+	check("布局：卡片占几行、消息区就让几行", okLayout)
+	check("View 集成：行数不变 / 卡片在消息区底部（Claude Code 式）/ 宽度合规", okRows && okBottom && okW2)
 
 	if failed {
 		fmt.Println("todostest: 有失败项")

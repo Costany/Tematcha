@@ -4,8 +4,8 @@
 //   - []rune 编辑（中文安全）+ slices.Insert/Delete
 //   - 反色光标 + 闪烁（由主模型 500ms 心跳统一驱动）
 //   - 水平滚动保证光标永远可见（horizontalWindow）
-//   - 输入区 = 上下两条细线 + 提示符；每行单独渲染、单独缩进
-//     （多行字符串缩进坑的正面示范）
+//   - 输入区 = 一行输入 + 一条底线；左侧提示符两态（聚焦 ❯ / 失焦 :::，恒 4 格）
+//     每行单独渲染、单独缩进（多行字符串缩进坑的正面示范）
 //   - 状态栏左右对齐 = lipgloss.Width 差值补空格
 package main
 
@@ -125,39 +125,56 @@ func (m model) blockWidth() int {
 	return w
 }
 
-// textWidth 输入文字可用宽度 = 总宽 - 提示符(1格) - 间隔(1格)。
+// textWidth 输入文字可用宽度 = 总宽 - promptW（左边距 2 格已含在 blockWidth 外）。
 func (m model) textWidth() int {
-	w := m.blockWidth() - 2
+	w := m.blockWidth() - promptW
 	if w < 8 {
 		w = 8
 	}
 	return w
 }
 
+// promptW 输入框左侧提示符的固定宽度（M29）。两态都恰好 promptW 格
+// （照 Crush 的 SetPromptFunc(4, ...) 契约：失焦 ":::" + 右衬空格，聚焦
+// "  ❯ "），所以切焦点时整行宽度不变、光标不会左右呼吸。
+const promptW = 4
+
+// 输入框左侧提示符的两态（M29 ②③）：
+//   - 聚焦：「  ❯ 」——保留 Tematcha 的 ❯（比 ASCII > 有力），前缀补到 4 格
+//   - 失焦：「::: 」——照 Crush 的失焦态，三个冒号横排一行 + 右衬空格
+//
+// 冒号是 ASCII U+003A，各 1 格宽，不是盲文（Crush 源码里也没有盲文字符）。
+// 鼠标点输入框 = 聚焦，点别处 = 失焦（见 main.handleClick）。
+const (
+	promptFocused = "  \u276F " // 2 空格 + ❯ + 1 空格 = 4 格
+	promptBlurred = ":::" + " " // 3 冒号 + 1 空格 = 4 格
+)
+
 // ---------------------------------------------------------------------------
 // 输入区渲染
 // ---------------------------------------------------------------------------
 
-// renderInputBlock 输入区：上下两条细线 + 提示符行。
-// 每一行单独渲染、单独带缩进 —— 绝不能写 "  " + 多行字符串！
+// renderInputBlock 输入区（M29 ①：单底线 —— 只在输入行下方留一条细线，
+// 不再是上下夹住的两条）。宽度守恒：输入行补空格到 blockWidth，两行等宽。
 func (m model) renderInputBlock() string {
 	rule := "  " + ruleStyle.Render(strings.Repeat("\u2500", m.blockWidth()))
-	row := m.renderPrompt() + " " + m.renderInputLine()
+	// 提示符自带右侧衬空格（两态都是 4 格），后面直接接输入行
+	row := m.renderPrompt() + m.renderInputLine()
 
 	// 手动补空格到固定宽度：光标闪烁时整行宽度不变（不会左右"呼吸"）
 	if pad := m.blockWidth() - lipgloss.Width(row); pad > 0 {
 		row += strings.Repeat(" ", pad)
 	}
-	return rule + "\n" + "  " + row + "\n" + rule
+	return "  " + row + "\n" + rule
 }
 
-// renderPrompt 提示符（空输入时暗淡，打字后变绿；颜色随主题）。
+// renderPrompt 左侧提示符：聚焦亮绿 ❯（M29 ②③，照 Crush 的焦点指示器
+// 占据固定 4 格列的契约），失焦退回暗色 :::
 func (m model) renderPrompt() string {
-	st := promptOffStyle
-	if len(m.input.buf) > 0 {
-		st = promptOnStyle
+	if m.inputFocused {
+		return promptOnStyle.Render(promptFocused)
 	}
-	return st.Render("\u276F")
+	return promptOffStyle.Render(promptBlurred)
 }
 
 // renderInputLine 输入行内容（含反色光标）。
@@ -546,6 +563,9 @@ func (m model) hintText() string {
 	}
 	if m.sessOn {
 		return "\u2191\u2193 选择  \u00B7  enter 载入  \u00B7  esc 关闭"
+	}
+	if m.resumeRebind != nil {
+		return "enter / y 使用当前模型  \u00B7  esc / n 取消"
 	}
 	if m.loading {
 		return "会话载入中\u2026"

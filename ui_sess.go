@@ -35,6 +35,15 @@ type SessionRow struct {
 	Updated string // ISO 8601（展示时截成 MM-DD HH:MM）
 }
 
+// ResumeRebindPrompt 是旧模型已删除后的显式 continue-as 确认。确认只在
+// 用户按键后发送 override；取消不会切换模型或改 transcript。
+type ResumeRebindPrompt struct {
+	ID            string
+	Title         string
+	RecordedModel string
+	ActiveModel   string
+}
+
 // parseSessions 解析 session/list 的 sessions 数组（缺失字段容错跳过）。
 func parseSessions(items []any) []SessionRow {
 	out := make([]SessionRow, 0, len(items))
@@ -86,9 +95,10 @@ type sessListMsg struct {
 
 // sessLoadDoneMsg session/load 的应答（历史重放已在此之前到达）。
 type sessLoadDoneMsg struct {
-	id    string
-	title string // 列表行的标题：session/load 应答里没有它，只能从这儿带过去
-	err   error
+	id           string
+	title        string // 列表行的标题：session/load 应答里没有它，只能从这儿带过去
+	reboundModel string // 非空 = 这次是用户确认后的显式模型重绑
+	err          error
 }
 
 // fetchSessions 去引擎拉会话列表。
@@ -113,19 +123,71 @@ func fetchSessions(c *ACPClient) tea.Cmd {
 // 事故：/resume 后只剩三条提问，回答全不见了），把 loading/busy 提前翻假，
 // 后面的 agent chunk 就走 lastAssistant 合并路径。塞回同一条 FIFO 通道即与
 // 重放严格保序。
-func loadSessionAsync(c *ACPClient, id, title string) tea.Cmd {
+func loadSessionAsync(c *ACPClient, id, title, reboundModel string) tea.Cmd {
 	return func() tea.Msg {
 		if c == nil {
-			return sessLoadDoneMsg{id: id, title: title, err: fmt.Errorf("没有可用的引擎连接")}
+			return sessLoadDoneMsg{id: id, title: title, reboundModel: reboundModel, err: fmt.Errorf("没有可用的引擎连接")}
 		}
-		_, err := c.LoadSession(id, workspace)
+		var err error
+		if reboundModel == "" {
+			_, err = c.LoadSession(id, workspace)
+		} else {
+			_, err = c.LoadSessionWithModelOverride(id, workspace, reboundModel)
+		}
 		c.Events <- ACPEvent{
 			Method: methodLoadDone,
-			Params: map[string]any{"id": id, "title": title},
-			Err:    err,
+			Params: map[string]any{
+				"id": id, "title": title, "reboundModel": reboundModel,
+			},
+			Err: err,
 		}
 		return noopMsg{}
 	}
+}
+
+// beginSessionLoad 统一普通载入与显式重绑的本地状态切换。历史会整段重放，
+// 所以两种路径都先清 feed；协议 override 只由确认后的调用传入。
+func (m model) beginSessionLoad(id, title, reboundModel string) (tea.Model, tea.Cmd) {
+	m.loading = true
+	m.busy = true
+	m.status = stLoading
+	m.resumeRebind = nil
+	m.clearCursor()
+	m.endThoughtCycle()
+	m.endAssistantSegment()
+	m.curAssistant, m.curThought, m.active, m.usageItem = nil, nil, nil, nil
+	m.tools = make(map[string]*FeedItem)
+	m.feed = NewFeed()
+	note := "载入会话 " + id + "（引擎将重放历史）"
+	if reboundModel != "" {
+		note = "载入会话 " + id + "（改用 " + reboundModel + "，引擎将重放历史）"
+	}
+	m.feed.Append(kSys, note)
+	m.resetUsage()
+	m.closeLine, m.closeKind = "", closePlain
+	m.syncLayout()
+	return m, loadSessionAsync(m.client, id, title, reboundModel)
+}
+
+func (m model) acceptResumeRebind() (tea.Model, tea.Cmd) {
+	p := m.resumeRebind
+	if p == nil {
+		return m, nil
+	}
+	return m.beginSessionLoad(p.ID, p.Title, p.ActiveModel)
+}
+
+func (m model) cancelResumeRebind() (tea.Model, tea.Cmd) {
+	if m.resumeRebind == nil {
+		return m, nil
+	}
+	m.resumeRebind = nil
+	m.status = stIdle
+	m.closeLine, m.closeKind = "", closePlain
+	m.feed.ScrollToBottom()
+	m.feed.Append(kSys, "已取消模型重绑，继续使用当前会话")
+	m.syncLayout()
+	return m, nil
 }
 
 // newSessionDoneMsg session/new 的应答。与 loadSessionAsync 不同：新建会话没有
@@ -242,6 +304,27 @@ func (m model) renderSessionPicker() []string {
 		out = append(out, "  "+dimStyle.Render(fmt.Sprintf("\u2026 还有 %d 条", more)))
 	}
 	return out
+}
+
+// renderResumeRebind 渲染旧模型不可用后的显式重绑确认。面板只占输入区上方，
+// 消息区高度由 syncLayout 同步扣出；只用前景色和一条竖线，不加背景。
+func (m model) renderResumeRebind() []string {
+	p := m.resumeRebind
+	if p == nil {
+		return nil
+	}
+	budget := m.blockWidth()
+	textW := budget - 4
+	if textW < 12 {
+		textW = 12
+	}
+	gutter := "  " + warnStyle.Render("\u2503") + " "
+	return []string{
+		gutter + accentStyle.Render("原模型已不可用"),
+		gutter + textStyle.Render(clipWidth(p.RecordedModel+"  →  "+p.ActiveModel, textW)),
+		gutter + dimStyle.Render("确认后会在原会话中记录一次模型切换"),
+		gutter + dimStyle.Render("enter / y 使用当前模型  ·  esc / n 取消"),
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +496,8 @@ func runLoadTest() {
 				if ev.Method == methodLoadDone {
 					id, _ := ev.Params["id"].(string)
 					title, _ := ev.Params["title"].(string)
-					nm, _ := m.finishLoad(id, title, ev.Err)
+					reboundModel, _ := ev.Params["reboundModel"].(string)
+					nm, _ := m.finishLoad(id, title, reboundModel, ev.Err)
 					mv := nm.(model)
 					m = &mv
 					continue
@@ -495,15 +579,78 @@ func runLoadTest() {
 	check("护栏：loading 中思考 chunk 也不合并（两块思考）",
 		countKind(t, kThought) == 2 && t.feed.items[2].Text == "想二")
 
-	// ⑤ 失败路径：finishLoad 带 err → 错误行 + status=error，且不落"已载入"
+	// ⑤ 普通失败路径：finishLoad 带 err → 错误行 + status=error，且不落"已载入"
 	e := newLoading()
-	ev, _ := e.finishLoad("x", "", fmt.Errorf("引擎内部错误：session transcript is already open for writing"))
+	ev, _ := e.finishLoad("x", "", "", fmt.Errorf("引擎内部错误：session transcript is already open for writing"))
 	em := ev.(model)
 	check("失败路径：落错误行、status=error、不谎报已载入",
 		em.status == stError && countKind(&em, kError) == 1 &&
 			strings.Contains(em.feed.items[em.feed.Len()-1].Text, "载入会话失败"))
 
-	// ⑥ 用户消息在重放里照收（loading 期间不吃 localEcho 去重）
+	// ⑥ M27：结构化旧模型错误只弹显式确认，不把原始 -32603 噪音铺满消息区。
+	resumeErr := newACPError(map[string]any{
+		"code":    int64(-32603),
+		"message": "failed to prepare resumed session: recorded model is unavailable",
+		"data": map[string]any{
+			"code":                       resumeModelUnavailableCode,
+			"recordedModel":              "guji/step-3.7-flash",
+			"activeModel":                "guji/MiniMax-M3",
+			"canContinueWithActiveModel": true,
+		},
+	})
+	offer, offerOK := resumeRebindOfferForError(resumeErr)
+	check("结构化错误：仅在 letcode 明确允许时提供原模型→当前模型重绑",
+		offerOK && offer.RecordedModel == "guji/step-3.7-flash" && offer.ActiveModel == "guji/MiniMax-M3")
+
+	r := newLoading()
+	rv, _ := r.finishLoad("old-session", "旧会话", "", resumeErr)
+	rm := rv.(model)
+	check("缺模型错误：落确认状态、不落 ERROR、不谎报已载入",
+		rm.resumeRebind != nil && rm.status == stIdle && countKind(&rm, kError) == 0 &&
+			rm.sessionID != "old-session")
+
+	promptLines := rm.renderResumeRebind()
+	joined := strings.Join(promptLines, "\n")
+	promptWide, promptClear := true, true
+	for _, line := range promptLines {
+		if lipgloss.Width(line) > rm.blockWidth() || hasStrayBackground(line) {
+			promptWide, promptClear = false, false
+		}
+	}
+	check("重绑面板：宽度合规、无背景、原/新模型与键位提示齐全",
+		len(promptLines) == 4 && promptWide && promptClear &&
+			strings.Contains(stripANSI(joined), "guji/step-3.7-flash") &&
+			strings.Contains(stripANSI(joined), "guji/MiniMax-M3") &&
+			strings.Contains(rm.hintText(), "使用当前模型"))
+
+	// n/esc 只取消本地确认，不发送 override、不切换模型。
+	cv, _ := rm.handleKey(press('n', "n"))
+	cm := cv.(model)
+	check("重绑取消：n 关闭面板、恢复空闲、原会话不变",
+		cm.resumeRebind == nil && cm.status == stIdle && !cm.busy && cm.sessionID != "old-session" &&
+			strings.Contains(cm.feed.items[cm.feed.Len()-1].Text, "已取消模型重绑"))
+
+	// y/enter 才重发带 override 的 load；nil client 自检里只验证本地状态与命令。
+	av, acceptCmd := rm.handleKey(press('y', "y"))
+	am := av.(model)
+	check("重绑确认：y 清面板并进入二次载入，目标模型写入提示",
+		am.resumeRebind == nil && am.loading && am.busy && am.status == stLoading && acceptCmd != nil &&
+			strings.Contains(am.feed.items[0].Text, "guji/MiniMax-M3"))
+
+	params := sessionLoadParams("old-session", `F:\lab`, "guji/MiniMax-M3")
+	meta := asMap(params["_meta"])
+	plainParams := sessionLoadParams("old-session", `F:\lab`, "")
+	_, plainHasMeta := plainParams["_meta"]
+	check("session/load override：只给显式重绑加 namespaced _meta",
+		meta != nil && meta[loadModelMetaKey] == "guji/MiniMax-M3" && !plainHasMeta)
+
+	okv, _ := newLoading().finishLoad("old-session", "旧会话", "guji/MiniMax-M3", nil)
+	om := okv.(model)
+	check("重绑成功回执：原 session id 生效并明确模型切换",
+		om.sessionID == "old-session" && om.resumeRebind == nil && om.status == stDone &&
+			strings.Contains(om.feed.items[om.feed.Len()-1].Text, "模型 → guji/MiniMax-M3"))
+
+	// ⑦ 用户消息在重放里照收（loading 期间不吃 localEcho 去重）
 	d := newLoading()
 	d.localEcho = "问一" // 刻意留一条会撞上的本地回显
 	replay(d, "user_message_chunk", "问一")
