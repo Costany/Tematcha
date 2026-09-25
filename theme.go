@@ -546,6 +546,18 @@ func runThemeTest() {
 	check("推理档配色：sprout 五档各就各位且互不相同；mono 全灰（含 none 降级档）",
 		okThink && okThinkMono)
 
+	// ④e M26：工具命令语法色跟随主题；切换主题后缓存必须重建，
+	// sprout 保留多种前景色，mono 只输出灰阶，且两种主题都不铺背景。
+	syntaxCommand := `for f in providers/openrouter/language_model_hooks.go; do echo "$f"; done`
+	applyTheme(sproutTheme)
+	sproutSyntax := strings.Join(shellCommandLines(syntaxCommand, 48), "\n")
+	applyTheme(monoTheme)
+	monoSyntax := strings.Join(shellCommandLines(syntaxCommand, 48), "\n")
+	applyTheme(sproutTheme)
+	okSyntaxTheme := hasNonGrayColor(sproutSyntax) && !hasNonGrayColor(monoSyntax) &&
+		!hasStrayBackground(sproutSyntax) && !hasStrayBackground(monoSyntax)
+	check("工具命令高亮：sprout 有彩色语法且 mono 全灰；切主题后缓存重建、无背景色", okSyntaxTheme)
+
 	// ⑤ 渐变：10 格、端点 = A / C、50% 填充格 ≥3 种颜色（确实在渐变）
 	grad := contextBarGrad(10)
 	probe := func(c color.Color) string {

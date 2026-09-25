@@ -857,11 +857,11 @@ func toolBodyLines(it *FeedItem, w int) []string {
 
 	// 输入：shell 的 command 用 $ 前缀（最像命令的一行）；其余紧凑 JSON 暗色平铺。
 	if it.ToolCmd != "" {
-		for i, ln := range wrapText(it.ToolCmd, textW) {
+		for i, ln := range shellCommandLines(it.ToolCmd, textW) {
 			if i == 0 {
-				out = append(out, "  "+dimStyle.Render("$")+" "+textStyle.Render(ln))
+				out = append(out, "  "+dimStyle.Render("$")+" "+ln)
 			} else {
-				out = append(out, "    "+textStyle.Render(ln))
+				out = append(out, "    "+ln)
 			}
 		}
 	} else if it.ToolName == "edit__apply_patch" && hasPatchEdits(it.ToolRaw) {
@@ -1240,6 +1240,74 @@ func runFeedTest() {
 		bad = true
 	} else {
 		fmt.Printf("OK 折行断言：词边界优先 %v ｜ 超长词硬切 %v ｜ 样张 %q\n", okWord, okHard, wrapLines)
+	}
+
+	// M26：shell 命令先高亮再按显示宽度折行；续行必须重开断点处的
+	// 前景色，同时保持非空白内容、宽度与透明度。
+	fmt.Println()
+	{
+		const commandWidth = 34
+		command := `for f in providers/openrouter/language_model_hooks.go; do echo "$f"; done`
+		lines := shellCommandLines(command, commandWidth)
+		joined := strings.Join(lines, "\n")
+
+		colors := map[string]bool{}
+		for _, match := range rgbRe.FindAllStringSubmatch(joined, -1) {
+			colors[match[0]] = true
+		}
+		withinWidth := true
+		coloredContinuations := 0
+		for i, line := range lines {
+			if lipgloss.Width(line) > commandWidth {
+				withinWidth = false
+			}
+			if i > 0 && strings.Contains(line, "\x1b[38;2;") {
+				coloredContinuations++
+			}
+		}
+
+		item := &FeedItem{Kind: kTool, ToolName: "shell__exec", ToolCmd: command, ToolExpanded: true}
+		body := toolBodyLines(item, commandWidth+8)
+		bodyJoined := strings.Join(body, "\n")
+		bodyWidth := commandWidth + 8
+		bodyWithinWidth := true
+		bodyColoredContinuations := 0
+		for i, line := range body {
+			if lipgloss.Width(line) > bodyWidth {
+				bodyWithinWidth = false
+			}
+			if i > 0 && strings.Contains(line, "\x1b[38;2;") {
+				bodyColoredContinuations++
+			}
+		}
+		plainCommand := stripANSI(strings.Join(lines, "\n"))
+		bodyPlainCommand := stripANSI(strings.Join(body, "\n"))
+		bodyCommand := strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(bodyPlainCommand, " "), "$"))
+		bodyHasPrompt := strings.Contains(bodyPlainCommand, "$")
+
+		commandContent := strings.Join(strings.Fields(command), "")
+		okSyntax := len(lines) > 1 && len(colors) >= 2 && coloredContinuations > 0 &&
+			withinWidth && strings.Join(strings.Fields(plainCommand), "") == commandContent &&
+			!hasStrayBackground(joined) && bodyHasPrompt && bodyWithinWidth &&
+			strings.Join(strings.Fields(bodyCommand), "") == commandContent &&
+			bodyColoredContinuations > 0 && !hasStrayBackground(bodyJoined)
+		if okSyntax {
+			fmt.Printf("OK shell 高亮：%d 种前景色、续行保色、非空白内容完整、每行≤%d 格、无背景色\n", len(colors), commandWidth)
+		} else {
+			bad = true
+			fmt.Printf("!! shell 高亮断言失败：折行=%v 色数=%d 直续行保色=%v 宽度=%v 原文=%v 工具提示符=%v 工具宽度=%v 工具内容=%v 工具续行保色=%v\n",
+				len(lines) > 1, len(colors), coloredContinuations > 0, withinWidth,
+				strings.Join(strings.Fields(plainCommand), "") == strings.Join(strings.Fields(command), ""),
+				bodyHasPrompt, bodyWithinWidth,
+				strings.Join(strings.Fields(bodyCommand), "") == strings.Join(strings.Fields(command), ""),
+				bodyColoredContinuations > 0)
+		}
+		for i, line := range lines {
+			if i >= 3 {
+				break
+			}
+			fmt.Printf("  %q  (w=%d)\n", stripANSI(line), lipgloss.Width(line))
+		}
 	}
 
 	// 聚合折叠断言（M6）：三张连续完成的 read 卡 → 一行「read 3 · expand」
