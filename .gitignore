@@ -2,3 +2,6 @@
 *.exe~
 *.log
 .tools/
+
+# 备份二进制：*.exe 匹配不到 tematcha.exe.bak-20260925 这类后缀名
+*.exe.bak*
